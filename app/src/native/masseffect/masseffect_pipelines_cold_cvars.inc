@@ -111,6 +111,24 @@ REXCVAR_DEFINE_INT32(masseffect_native_pipelines_prewarm_priority, -1, "MASSEFFE
                      "accepts from 0x3F to 0x3B, as before")
     .range(-1, 0x3F)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+/*
+ * masseffect_native_pipelines_prewarm_blocking: a loading screen instead of background compiles during play.
+ *
+ * In the background (the default) the prewarm threads compile the list at the lowest priority for as long as it
+ * takes, and on a cold cache that is the whole first quarter hour of play: console run 2026-10-24 (EN, 800x448), the
+ * two threads held 60-90 % of a core for 5 minutes (1,563 really compiled, ~240 ms each while sharing the cores) on a
+ * process that has 3 cores and was at 280 % of 300 %, and the ring still compiled 41 list pipelines the threads had
+ * not reached (77 ms each, mid-frame). Cutscenes and scene changes fell to 8-13 fps. With this on, the first guest
+ * Swap waits (and the game with it) until the whole list is prewarmed by 3 threads at priority 0x2C, the output
+ * showing "PREPARING SHADERS" and a progress bar (TargetsVulkan::PaintProgress); then the cache is saved and play
+ * starts with nothing compiling behind it. A warm start (every pipeline already in the saved cache) only takes the
+ * cache hits.
+ */
+REXCVAR_DEFINE_BOOL(masseffect_native_pipelines_prewarm_blocking, false, "MASSEFFECT",
+                    "Native renderer: compile the whole pipeline list before the game's first frame, on every core, "
+                    "behind a progress screen, instead of in the background during play. Needs "
+                    "masseffect_native_pipelines_prewarm")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_INT32(masseffect_native_pipelines_prewarm_delay_s, 25, "MASSEFFECT",
                      "Native renderer: seconds the prewarm threads wait after start before compiling. A cold start "
                      "(no pipeline cache yet) compiling the whole list during the first seconds, while the game loads "

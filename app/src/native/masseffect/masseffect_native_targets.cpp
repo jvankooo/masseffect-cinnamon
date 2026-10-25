@@ -69,6 +69,7 @@ extern "C" void RexSwitchPerfHitch(uint64_t start, uint64_t end);
 #include <map>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
@@ -407,6 +408,10 @@ REXCVAR_DEFINE_BOOL(masseffect_native_skip_cleared_repeated, true, "MASSEFFECT",
 // at once.
 REXCVAR_DECLARE(int32_t, masseffect_native_stats_per_draw_s);
 REXCVAR_DECLARE(int32_t, masseffect_native_query_mode);  // me_native_system.cpp
+REXCVAR_DECLARE(bool, masseffect_flare_occlusion);  // ../me_flare_occlusion.cpp
+namespace me::native {
+void FlareResult(uint32_t key, uint32_t samples);  // ../me_flare_occlusion.cpp (ring thread)
+}  // namespace me::native
 REXCVAR_DECLARE(int32_t, masseffect_diag_velocity);  // masseffect_native_draws.cpp (docs/image-defects-feros.md)
 REXCVAR_DECLARE(int32_t, masseffect_diag_blur_source);  // masseffect_native_draws.cpp (docs/image-defects-feros.md 3.8)
 REXCVAR_DECLARE(int32_t, masseffect_native_velocity_16_16);  // masseffect_native_draws.cpp (me_fixed16_spirv.h)
@@ -480,6 +485,21 @@ REXCVAR_DEFINE_BOOL(masseffect_native_ramp_gamma, true, "MASSEFFECT",
                     "Native renderer: apply the gamma ramp the game loads at the output, like the Xbox 360 "
                     "display (without it, midtones and shadows come out darker). false: the image as is")
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// FXAA in the output pass (shaders/me_output_fxaa.frag). At an internal resolution below 720p the presenter's
+// upscale (present_effect) enlarges every stair step of an edge; FXAA smooths them on the small frame first. It
+// replaces the exact-texel ramp variant, so a pixel off an edge is the same byte as without it. Its cost is one
+// full-screen pass over the WxH frame (5 taps per pixel, up to 18 on edges).
+REXCVAR_DEFINE_BOOL(masseffect_native_output_fxaa, false, "MASSEFFECT",
+                    "Native renderer: FXAA 3.11 on the finished frame before the presenter upscales it (smooths "
+                    "jagged edges of a low internal resolution; pixels off edges unchanged). Needs "
+                    "masseffect_native_ramp_gamma");
+REXCVAR_DEFINE_DOUBLE(masseffect_native_output_fxaa_subpix, 0.75, "MASSEFFECT",
+                      "FXAA subpixel aliasing removal: 0 = edges only (sharpest), 0.75 = FXAA default, 1 = softest")
+    .range(0.0, 1.0);
+REXCVAR_DEFINE_DOUBLE(masseffect_native_output_fxaa_threshold, 0.125, "MASSEFFECT",
+                      "FXAA minimum local contrast for an edge, relative to the brightest neighbour: 0.063 = "
+                      "every faint edge (slowest), 0.125 = high quality, 0.166 = FXAA default, 0.333 = strong edges only")
+    .range(0.063, 0.333);
 
 namespace masseffect::native {
 namespace shaders {
@@ -490,6 +510,9 @@ namespace shaders {
 // The same sampling as guest_output_bilinear_ps with the game's gamma ramp
 // (precompiled SPIR-V of the ramp pixel shader).
 #include "shaders/masseffect_output_ramp_gamma_ps.h"
+const uint32_t me_output_fxaa_fs[] = {
+#include "me_output_fxaa.inc"
+};
 const uint32_t masseffect_edram_7e3_to_rgba8_cs[] = {
 #include "masseffect_edram_7e3_to_rgba8.inc"
 };
@@ -990,6 +1013,8 @@ class TargetsVulkan final : public TargetsNative, public ContextTargets {
       if (p != VK_NULL_HANDLE) dfn_.vkDestroyPipeline(device_, p, nullptr);
     }
     if (fs_ramp_ != VK_NULL_HANDLE) dfn_.vkDestroyShaderModule(device_, fs_ramp_, nullptr);
+    if (pipeline_fxaa_ != VK_NULL_HANDLE) dfn_.vkDestroyPipeline(device_, pipeline_fxaa_, nullptr);
+    if (fs_fxaa_ != VK_NULL_HANDLE) dfn_.vkDestroyShaderModule(device_, fs_fxaa_, nullptr);
     for (RampOutput& ramp : ramps_output_) {
       if (ramp.buffer != VK_NULL_HANDLE) dfn_.vkDestroyBuffer(device_, ramp.buffer, nullptr);
       if (ramp.memory != VK_NULL_HANDLE) dfn_.vkFreeMemory(device_, ramp.memory, nullptr);
@@ -1346,7 +1371,10 @@ const std::array<std::pair<const uint32_t*, size_t>, 14> codes_conversion{{
                                                   : "not available");
       // Real occlusion queries (masseffect_native_query_mode 2 and 3). Without the pool every guest query falls
       // back to "visible", as with mode 0.
-      if (REXCVAR_GET(masseffect_native_query_mode) >= 2 && read_queries_) {
+      // Also in mode 0 for the flare queries alone (masseffect_flare_occlusion, me_flare_occlusion.cpp).
+      if ((REXCVAR_GET(masseffect_native_query_mode) >= 2 ||
+           (REXCVAR_GET(masseffect_native_query_mode) == 0 && REXCVAR_GET(masseffect_flare_occlusion))) &&
+          read_queries_) {
         VkQueryPoolCreateInfo info_occlusion{};
         info_occlusion.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
         info_occlusion.queryType = VK_QUERY_TYPE_OCCLUSION;
@@ -1403,7 +1431,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 14> codes_conversion{{
     ranges[0].size = 16;  // GuestOutputPaintRectangleConstants
     ranges[1].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     ranges[1].offset = 16;
-    ranges[1].size = 16;  // Presenter::BilinearConstants
+    ranges[1].size = 32;  // Presenter::BilinearConstants (16), then the FXAA constants of me_output_fxaa.frag
     VkPipelineLayoutCreateInfo info_pipeline_layout{};
     info_pipeline_layout.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
     info_pipeline_layout.setLayoutCount = 1;
@@ -1493,6 +1521,13 @@ const std::array<std::pair<const uint32_t*, size_t>, 14> codes_conversion{{
       info_module.pCode = shaders::masseffect_output_ramp_gamma_ps;
       if (dfn_.vkCreateShaderModule(device_, &info_module, nullptr, &fs_ramp_) != VK_SUCCESS) {
         return false;
+      }
+      // FXAA (masseffect_native_output_fxaa) reads the ramp too; without the module it is only skipped.
+      info_module.codeSize = sizeof(shaders::me_output_fxaa_fs);
+      info_module.pCode = shaders::me_output_fxaa_fs;
+      if (dfn_.vkCreateShaderModule(device_, &info_module, nullptr, &fs_fxaa_) != VK_SUCCESS) {
+        fs_fxaa_ = VK_NULL_HANDLE;
+        REXLOG_WARN("[native] targets: could not create the FXAA output shader: the output goes without FXAA");
       }
     }
 
@@ -1624,6 +1659,22 @@ const std::array<std::pair<const uint32_t*, size_t>, 14> codes_conversion{{
     return pipeline;
   }
 
+  // The output pass with FXAA and the ramp (masseffect_native_output_fxaa), created on first use: the setting can be
+  // turned on from the settings overlay. VK_NULL_HANDLE if it cannot be made (logged once).
+  VkPipeline PipelineFxaa() {
+    if (pipeline_fxaa_ == VK_NULL_HANDLE && !pipeline_failed_fxaa_) {
+      if (fs_fxaa_ != VK_NULL_HANDLE) pipeline_fxaa_ = CreatePipelineOutput(fs_fxaa_, nullptr);
+      if (pipeline_fxaa_ == VK_NULL_HANDLE) {
+        pipeline_failed_fxaa_ = true;
+        REXLOG_ERROR("[native] targets: could not create the FXAA output pass{}: the output goes without FXAA",
+                     ramp_gamma_ ? "" : " (it needs masseffect_native_ramp_gamma)");
+      } else {
+        REXLOG_INFO("[native] targets: FXAA output pass created");
+      }
+    }
+    return pipeline_fxaa_;
+  }
+
   bool Copy(const RegistersCopy& reg) override { return CopyInternal(reg); }
 
   bool CopyInternal(const RegistersCopy& reg) {
@@ -1653,8 +1704,22 @@ const std::array<std::pair<const uint32_t*, size_t>, 14> codes_conversion{{
     const uint32_t source = control & 0x7;
     const bool clear_color = (control >> 8) & 0x1;
     const uint32_t command = (control >> 20) & 0x3;
-    const bool do_copy = command == uint32_t(xenos::CopyCommand::kRaw) ||
-                        command == uint32_t(xenos::CopyCommand::kConvert);
+    bool do_copy = command == uint32_t(xenos::CopyCommand::kRaw) ||
+                   command == uint32_t(xenos::CopyCommand::kConvert);
+    // The game's predicated tiling resolves its second tile from row 512 (its EDRAM plan is made for 1280x720). With
+    // an internal resolution under 512 rows (me_resolution.cpp) that tile lies wholly below the destination texture
+    // and the guest D3D writes destination height = texture height - 512, wrapped to 14 bits (800x448: 16320; a Xenos
+    // texture is at most 8192 high). No texel of it lands in the texture, so only the copy is skipped: a clear in the
+    // same packet still runs. On the Xbox 360 the copy would write guest memory past the texture; this renderer keeps
+    // resolves on the GPU, so nothing reads it. Copying it made an 800x16320 image and its CPU-overwrite fingerprint
+    // ran off the end of guest memory (crash at the title screen, 2026-10-24).
+    if (do_copy && ((reg.rb_copy_dest_pitch >> 16) & 0x3FFF) > 8192) {
+      do_copy = false;
+      if (++copies_outside_destination_ <= 4)
+        REXLOG_INFO("[native] targets: copy below its destination texture skipped (dest base {:08X}, pitch {}, "
+                    "height field {}; the second predicated tile of a frame under 512 rows)",
+                    reg.rb_copy_dest_base, reg.rb_copy_dest_pitch & 0x3FFF, (reg.rb_copy_dest_pitch >> 16) & 0x3FFF);
+    }
     const uint32_t pitch = reg.rb_surface_info & 0x3FFF;
     const uint32_t msaa = (reg.rb_surface_info >> 16) & 0x3;
     msaa_edram_actual_ = msaa;
@@ -2486,8 +2551,39 @@ const std::array<std::pair<const uint32_t*, size_t>, 14> codes_conversion{{
     ++version_ramp_;
   }
 
+  // masseffect_native_pipelines_prewarm_blocking: one frame of the progress screen at the output size of the game's
+  // frames (the internal resolution's corner, else 1280x720).
+  void PresentLoader(rex::ui::Presenter* presenter, uint32_t visited, uint32_t total) {
+    uint32_t pw = 1280, ph = 720;
+    if (uint32_t cw = 0, ch = 0; MeResolutionOutputSize(&cw, &ch)) {
+      pw = std::min(pw, cw);
+      ph = std::min(ph, ch);
+    }
+    const uint32_t percent = total ? std::min<uint32_t>(99, uint32_t(uint64_t(visited) * 100 / total)) : 0;
+    presenter->RefreshGuestOutput(pw, ph, 1280, 720, [&](rex::ui::Presenter::GuestOutputRefreshContext& base) {
+      return PaintProgress(static_cast<VulkanPresenter::VulkanGuestOutputRefreshContext&>(base), pw, ph, percent);
+    });
+  }
+
+  int LoaderFrame(rex::ui::Presenter* presenter) override {
+    if (!draws_) return DrawsVulkan::kPrewarmNone;  // no draw code: nothing to prewarm
+    uint32_t visited = 0, total = 0;
+    const int state = draws_->PrewarmBlockingState(visited, total);
+    if (state == DrawsVulkan::kPrewarmRunning && presenter) PresentLoader(presenter, visited, total);
+    return state;
+  }
+
   bool Present(rex::ui::Presenter* presenter, const TextureSwap& swap, uint32_t width,
                  uint32_t height) override {
+    // masseffect_native_pipelines_prewarm_blocking, fallback of the startup loader (LoaderFrame): if the prewarm is
+    // still running at a Swap, the Swap waits, and the game with it, while the output shows the progress screen.
+    if (presenter && draws_) {
+      uint32_t visited = 0, total = 0;
+      while (draws_->PrewarmBlockingState(visited, total) == DrawsVulkan::kPrewarmRunning) {
+        PresentLoader(presenter, visited, total);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      }
+    }
     edram4_cleared_in_frame_.clear();  // redirected clear ordinals restart every frame
     BlurJournalSwap();  // masseffect_diag_blur_source: log the finished frame, read the cvar for the next
     if (draws_) draws_->NoteSwap();  // masseffect_native_query_occlusion_depth
@@ -2952,13 +3048,40 @@ const std::array<std::pair<const uint32_t*, size_t>, 14> codes_conversion{{
       return failure("materialized crop source is multisampled");
     const uint64_t source_revision = r->second.revision;
     uint32_t texel_bytes = 0;
+    // The crop is a same-format vkCmdCopyImage: any plain color format whose texel size is known works. k_16_16
+    // (VK_FORMAT_R16G16_UNORM / _SNORM) was missing: at the 720x400 scene its 736-wide resolve (UE3's velocity
+    // buffer) could not be cropped, the motion blur pass that reads it was rejected every frame and the cutscenes,
+    // where that pass writes the final picture, stayed black (2026-10-25 run 10).
     switch (canonical.format) {
+      case VK_FORMAT_R8_UNORM:
+      case VK_FORMAT_R8_SNORM: texel_bytes = 1; break;
+      case VK_FORMAT_R8G8_UNORM:
+      case VK_FORMAT_R8G8_SNORM:
+      case VK_FORMAT_R16_UNORM:
+      case VK_FORMAT_R16_SNORM:
+      case VK_FORMAT_R16_SFLOAT:
+      case VK_FORMAT_R5G6B5_UNORM_PACK16:
+      case VK_FORMAT_B5G6R5_UNORM_PACK16:
+      case VK_FORMAT_R4G4B4A4_UNORM_PACK16:
+      case VK_FORMAT_B4G4R4A4_UNORM_PACK16:
+      case VK_FORMAT_A1R5G5B5_UNORM_PACK16:
+      case VK_FORMAT_R5G5B5A1_UNORM_PACK16: texel_bytes = 2; break;
       case VK_FORMAT_R8G8B8A8_UNORM:
+      case VK_FORMAT_R8G8B8A8_SNORM:
+      case VK_FORMAT_B8G8R8A8_UNORM:
       case VK_FORMAT_A2B10G10R10_UNORM_PACK32:
+      case VK_FORMAT_A2R10G10B10_UNORM_PACK32:
+      case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
+      case VK_FORMAT_R16G16_UNORM:
+      case VK_FORMAT_R16G16_SNORM:
       case VK_FORMAT_R16G16_SFLOAT:
+      case VK_FORMAT_R32_UINT:
       case VK_FORMAT_R32_SFLOAT: texel_bytes = 4; break;
+      case VK_FORMAT_R16G16B16A16_UNORM:
+      case VK_FORMAT_R16G16B16A16_SNORM:
       case VK_FORMAT_R16G16B16A16_SFLOAT:
       case VK_FORMAT_R32G32_SFLOAT: texel_bytes = 8; break;
+      case VK_FORMAT_R32G32B32A32_SFLOAT: texel_bytes = 16; break;
       default: break;  // Native depth/stencil crops need a separate aspect contract.
     }
     xenos::xe_gpu_texture_fetch_t texture_fetch{};
@@ -3514,7 +3637,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 14> codes_conversion{{
     occlusion_open_measured_ = 0;
   }
 
-  bool QueryEnd(uint32_t address, uint32_t draws, double scale, uint32_t visible) override {
+  bool QueryEnd(uint32_t address, uint32_t draws, double scale, uint32_t visible, uint32_t flare_key) override {
     const bool open = occlusion_open_;
     occlusion_open_ = false;
     if (!open || occlusion_ == VK_NULL_HANDLE || !memory_) return false;
@@ -3545,6 +3668,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 14> codes_conversion{{
     guest.frame = occlusion_frames_;
     guest.scale = scale;
     guest.ended = std::chrono::steady_clock::now();
+    guest.key = flare_key;  // not latent: the count is written to the guest too
     slot.occlusion.push_back(guest);
     occlusion_pending_[address] = guest.serial;
     return true;
@@ -3739,6 +3863,16 @@ const std::array<std::pair<const uint32_t*, size_t>, 14> codes_conversion{{
             uint64_t(std::chrono::duration_cast<std::chrono::microseconds>(now - guest.ended).count());
         FoldOcclusionHistory(guest, samples);
         continue;
+      }
+      if (guest.key && read && guest.first + guest.count <= used &&
+          guest.first + guest.count <= slot.occlusion_multipliers.size()) {
+        // A flare query (mode 0): its element's count, whether or not the guest still waits for this issue.
+        double sum = 0.0;
+        for (uint32_t i = guest.first; i < guest.first + guest.count; ++i)
+          sum += double(values[i]) * double(slot.occlusion_multipliers[i]);
+        const double scaled = sum * guest.scale;
+        me::native::FlareResult(uint32_t(guest.key),
+                                scaled <= 0.0 ? 0u : uint32_t(std::min(std::ceil(scaled), double(UINT32_MAX))));
       }
       const auto it = occlusion_pending_.find(guest.address);
       if (it == occlusion_pending_.end() || it->second != guest.serial) continue;  // reissued or timed out
@@ -9866,6 +10000,9 @@ const std::array<std::pair<const uint32_t*, size_t>, 14> codes_conversion{{
 
   // Guest bytes of a resolve destination in tiled 32x32 blocks (what a texture at that base can occupy).
   static uint64_t ResolvedFootprint(uint32_t base, uint32_t pitch, uint32_t height, uint32_t guest_format) {
+    // A Xenos texture is at most 8192x8192: a larger size is not a texture the CPU could rewrite (and would reach
+    // past the guest memory that is mapped).
+    if (pitch > 8192 || height > 8192) return 0;
     const gr::FormatInfo* info = gr::FormatInfo::Get(guest_format);
     const uint64_t bytes_texel = info && info->bits_per_pixel >= 8 ? info->bits_per_pixel / 8 : 4;
     const uint64_t bytes = uint64_t((pitch + 31) & ~31u) * ((height + 31) & ~31u) * bytes_texel;
@@ -11288,10 +11425,9 @@ const std::array<std::pair<const uint32_t*, size_t>, 14> codes_conversion{{
 
   // from_target = the source is a render target's image (or a retained one) with the front buffer in its
   // corner and larger than the output (masseffect_native_lazy_front). Only requested with the exact variant.
-  bool PaintOutput(VulkanPresenter::VulkanGuestOutputRefreshContext& context, Image& source,
-                    uint32_t width, uint32_t height, bool from_target = false, bool cropped = false) {
-    // With masseffect_native_output_no_wait, the next of 3 slots, and it only waits if that one is still pending.
-    // Without it, always slot 0: it waits for the previous output.
+  // The output slot the next output pass records into. With masseffect_native_output_no_wait, the next of 3 slots,
+  // and it only waits if that one is still pending. Without it, always slot 0: it waits for the previous output.
+  uint32_t NextOutputSlot() {
     const uint32_t s = output_no_wait_ ? (output_current_ + 1) % kSlotsOutput : 0;
     if (pending_outputs_[s]) {
       const auto before_wait = std::chrono::steady_clock::now();  // output-wait report
@@ -11301,6 +11437,132 @@ const std::array<std::pair<const uint32_t*, size_t>, 14> codes_conversion{{
       pending_outputs_[s] = false;
     }
     output_current_ = s;
+    return s;
+  }
+
+  // The framebuffer of the presenter's current guest output image (created and kept per image version).
+  VkFramebuffer OutputFramebuffer(VulkanPresenter::VulkanGuestOutputRefreshContext& context, uint32_t width,
+                                  uint32_t height) {
+    for (const auto& f : framebuffers_) {
+      if (f.framebuffer != VK_NULL_HANDLE && f.version == context.image_version()) {
+        return f.framebuffer;
+      }
+    }
+    auto& f = framebuffers_[next_framebuffer_];
+    next_framebuffer_ = (next_framebuffer_ + 1) % framebuffers_.size();
+    if (f.framebuffer != VK_NULL_HANDLE) {
+      WaitOutputs();  // a pending output could still use this framebuffer
+      dfn_.vkDestroyFramebuffer(device_, f.framebuffer, nullptr);
+      f.framebuffer = VK_NULL_HANDLE;
+    }
+    VkImageView view = context.image_view();
+    VkFramebufferCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+    info.renderPass = render_pass_output_;
+    info.attachmentCount = 1;
+    info.pAttachments = &view;
+    info.width = width;
+    info.height = height;
+    info.layers = 1;
+    if (dfn_.vkCreateFramebuffer(device_, &info, nullptr, &f.framebuffer) != VK_SUCCESS) {
+      f.framebuffer = VK_NULL_HANDLE;
+      return VK_NULL_HANDLE;
+    }
+    f.version = context.image_version();
+    return f.framebuffer;
+  }
+
+  // masseffect_native_pipelines_prewarm_blocking: the loading screen shown while the pipeline list compiles before
+  // the first frame. "PREPARING SHADERS", a bar and the percentage, drawn with attachment clears only (one rectangle
+  // per lit pixel of a 5x7 font), so it needs no pipeline of its own.
+  bool PaintProgress(VulkanPresenter::VulkanGuestOutputRefreshContext& context, uint32_t width, uint32_t height,
+                     uint32_t percent) {
+    const uint32_t s = NextOutputSlot();
+    const VkFramebuffer framebuffer = OutputFramebuffer(context, width, height);
+    if (framebuffer == VK_NULL_HANDLE) return false;
+    dfn_.vkResetCommandPool(device_, pools_output_[s], 0);
+    VkCommandBufferBeginInfo start{};
+    start.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    start.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (dfn_.vkBeginCommandBuffer(commands_output_[s], &start) != VK_SUCCESS) return false;
+    VkRenderPassBeginInfo pass{};
+    pass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    pass.renderPass = render_pass_output_;
+    pass.framebuffer = framebuffer;
+    pass.renderArea.extent = {width, height};
+    dfn_.vkCmdBeginRenderPass(commands_output_[s], &pass, VK_SUBPASS_CONTENTS_INLINE);
+    const auto fill = [&](const std::vector<VkClearRect>& rects, float r, float g, float b) {
+      if (rects.empty()) return;
+      VkClearAttachment clear{};
+      clear.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+      clear.colorAttachment = 0;
+      clear.clearValue.color = {{r, g, b, 1.0f}};
+      dfn_.vkCmdClearAttachments(commands_output_[s], 1, &clear, uint32_t(rects.size()), rects.data());
+    };
+    const auto rect = [](int32_t x, int32_t y, uint32_t w, uint32_t h) {
+      return VkClearRect{{{x, y}, {w, h}}, 0, 1};
+    };
+    // 5x7 glyphs, one byte per row, bit 4 = left column.
+    static const std::array<std::pair<char, std::array<uint8_t, 7>>, 22> kFont = {{
+        {'A', {0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11}}, {'D', {0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E}},
+        {'E', {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F}}, {'G', {0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0F}},
+        {'H', {0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11}}, {'I', {0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E}},
+        {'N', {0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11}}, {'P', {0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10}},
+        {'R', {0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11}}, {'S', {0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E}},
+        {'0', {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E}}, {'1', {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E}},
+        {'2', {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F}}, {'3', {0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E}},
+        {'4', {0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02}}, {'5', {0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E}},
+        {'6', {0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E}}, {'7', {0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08}},
+        {'8', {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E}}, {'9', {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C}},
+        {'%', {0x18, 0x19, 0x02, 0x04, 0x08, 0x13, 0x03}}, {' ', {0, 0, 0, 0, 0, 0, 0}},
+    }};
+    const uint32_t px = std::max<uint32_t>(2, height / 112);  // font pixel: 4 at 448 rows
+    const auto text = [&](const std::string& line, int32_t y, std::vector<VkClearRect>& out) {
+      const int32_t advance = int32_t(6 * px);
+      int32_t x = (int32_t(width) - int32_t(line.size()) * advance + int32_t(px)) / 2;
+      for (const char c : line) {
+        for (const auto& [glyph, rows] : kFont) {
+          if (glyph != c) continue;
+          for (uint32_t row = 0; row < 7; ++row)
+            for (uint32_t column = 0; column < 5; ++column)
+              if (rows[row] & (0x10 >> column))
+                out.push_back(rect(x + int32_t(column * px), y + int32_t(row * px), px, px));
+        }
+        x += advance;
+      }
+    };
+    fill({rect(0, 0, width, height)}, 0.01f, 0.012f, 0.02f);  // background
+    const int32_t bar_w = int32_t(width) * 3 / 5, bar_h = int32_t(px) * 5;
+    const int32_t bar_x = (int32_t(width) - bar_w) / 2, bar_y = int32_t(height) / 2 - bar_h / 2;
+    std::vector<VkClearRect> light;
+    text("PREPARING SHADERS", bar_y - int32_t(px) * 14, light);
+    text(std::to_string(percent) + "%", bar_y + bar_h + int32_t(px) * 6, light);
+    fill(light, 0.78f, 0.80f, 0.84f);
+    const int32_t border = int32_t(std::max<uint32_t>(1, px / 2));
+    fill({rect(bar_x - border * 2, bar_y - border * 2, uint32_t(bar_w + border * 4), uint32_t(bar_h + border * 4))},
+         0.45f, 0.47f, 0.52f);
+    fill({rect(bar_x - border, bar_y - border, uint32_t(bar_w + border * 2), uint32_t(bar_h + border * 2))}, 0.01f,
+         0.012f, 0.02f);
+    const uint32_t filled = uint32_t(int64_t(bar_w) * std::min<uint32_t>(percent, 100) / 100);
+    if (filled) fill({rect(bar_x, bar_y, filled, uint32_t(bar_h))}, 0.22f, 0.56f, 0.86f);
+    dfn_.vkCmdEndRenderPass(commands_output_[s]);
+    if (dfn_.vkEndCommandBuffer(commands_output_[s]) != VK_SUCCESS) return false;
+    VkSubmitInfo send{};
+    send.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    send.commandBufferCount = 1;
+    send.pCommandBuffers = &commands_output_[s];
+    {
+      const auto queue = vulkan_device_->AcquireQueue(family_, 0);
+      if (dfn_.vkQueueSubmit(queue.queue(), 1, &send, fences_output_[s]) != VK_SUCCESS) return false;
+    }
+    pending_outputs_[s] = true;
+    context.SetIs8bpc(true);
+    return true;
+  }
+
+  bool PaintOutput(VulkanPresenter::VulkanGuestOutputRefreshContext& context, Image& source,
+                    uint32_t width, uint32_t height, bool from_target = false, bool cropped = false) {
+    const uint32_t s = NextOutputSlot();
     // The gamma ramp, if it changed since this slot's last output (the GPU is no longer reading it).
     if (ramp_gamma_ && ramps_output_[s].version != version_ramp_) {
       RampOutput& ramp = ramps_output_[s];
@@ -11308,35 +11570,9 @@ const std::array<std::pair<const uint32_t*, size_t>, 14> codes_conversion{{
       rex::ui::vulkan::util::FlushMappedMemoryRange(vulkan_device_, ramp.memory, ramp.type);
       ramp.version = version_ramp_;
     }
-    VkFramebuffer framebuffer = VK_NULL_HANDLE;
-    for (const auto& f : framebuffers_) {
-      if (f.framebuffer != VK_NULL_HANDLE && f.version == context.image_version()) {
-        framebuffer = f.framebuffer;
-      }
-    }
+    const VkFramebuffer framebuffer = OutputFramebuffer(context, width, height);
     if (framebuffer == VK_NULL_HANDLE) {
-      auto& f = framebuffers_[next_framebuffer_];
-      next_framebuffer_ = (next_framebuffer_ + 1) % framebuffers_.size();
-      if (f.framebuffer != VK_NULL_HANDLE) {
-        WaitOutputs();  // a pending output could still use this framebuffer
-        dfn_.vkDestroyFramebuffer(device_, f.framebuffer, nullptr);
-        f.framebuffer = VK_NULL_HANDLE;
-      }
-      VkImageView view = context.image_view();
-      VkFramebufferCreateInfo info{};
-      info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-      info.renderPass = render_pass_output_;
-      info.attachmentCount = 1;
-      info.pAttachments = &view;
-      info.width = width;
-      info.height = height;
-      info.layers = 1;
-      if (dfn_.vkCreateFramebuffer(device_, &info, nullptr, &f.framebuffer) != VK_SUCCESS) {
-        f.framebuffer = VK_NULL_HANDLE;
-        return false;
-      }
-      f.version = context.image_version();
-      framebuffer = f.framebuffer;
+      return false;
     }
 
     VkDescriptorImageInfo info_image{};
@@ -11380,6 +11616,7 @@ const std::array<std::pair<const uint32_t*, size_t>, 14> codes_conversion{{
     const VkRect2D scissor{{0, 0}, {width, height}};
     dfn_.vkCmdSetScissor(commands_output_[s], 0, 1, &scissor);
     VkPipeline pipeline = pipeline_;
+    bool fxaa = false;
     if (ramp_gamma_) {
       // With an output the size of the source (the normal case), the exact texel, unfiltered.
       // From a render target, the output has the front buffer's size, not the image's
@@ -11387,7 +11624,10 @@ const std::array<std::pair<const uint32_t*, size_t>, 14> codes_conversion{{
       // would hold.
       // Cropped (internal resolution with a full-size front buffer): the WxH corner, texel for texel.
       const bool exact = from_target || cropped || (width == source.width && height == source.height);
-      pipeline = PipelineRamp(exact ? 1 : 0);
+      // FXAA (masseffect_native_output_fxaa) is the exact variant plus edge smoothing; it samples the front buffer
+      // texture, not a render target standing in for it (masseffect_native_lazy_front).
+      fxaa = exact && !from_target && REXCVAR_GET(masseffect_native_output_fxaa) && PipelineFxaa() != VK_NULL_HANDLE;
+      pipeline = fxaa ? pipeline_fxaa_ : PipelineRamp(exact ? 1 : 0);
       if (pipeline == VK_NULL_HANDLE) {
         pipeline = pipelines_ramp_[exact ? 1 : 0];  // requested variant missing: the usual one
       }
@@ -11408,8 +11648,26 @@ const std::array<std::pair<const uint32_t*, size_t>, 14> codes_conversion{{
       std::array<float, 2> inverse;
     } bilinear = {{0, 0}, cropped ? std::array<float, 2>{1.0f / float(source.width), 1.0f / float(source.height)}
                                   : std::array<float, 2>{1.0f / float(width), 1.0f / float(height)}};
-    dfn_.vkCmdPushConstants(commands_output_[s], layout_pipeline_, VK_SHADER_STAGE_FRAGMENT_BIT, 16,
-                            sizeof(bilinear), &bilinear);
+    if (fxaa) {
+      // me_output_fxaa.frag: texel steps of the source image, and the centre of the last texel of the WxH corner
+      // this frame occupies (the taps never leave it).
+      const struct {
+        int32_t displacement[2];
+        float inverse[2];
+        float uv_max[2];
+        float subpix;
+        float threshold;
+      } constants_fxaa = {{0, 0},
+                          {1.0f / float(source.width), 1.0f / float(source.height)},
+                          {(float(width) - 0.5f) / float(source.width), (float(height) - 0.5f) / float(source.height)},
+                          float(REXCVAR_GET(masseffect_native_output_fxaa_subpix)),
+                          float(REXCVAR_GET(masseffect_native_output_fxaa_threshold))};
+      dfn_.vkCmdPushConstants(commands_output_[s], layout_pipeline_, VK_SHADER_STAGE_FRAGMENT_BIT, 16,
+                              sizeof(constants_fxaa), &constants_fxaa);
+    } else {
+      dfn_.vkCmdPushConstants(commands_output_[s], layout_pipeline_, VK_SHADER_STAGE_FRAGMENT_BIT, 16,
+                              sizeof(bilinear), &bilinear);
+    }
     dfn_.vkCmdDraw(commands_output_[s], 4, 1, 0, 0);
     dfn_.vkCmdEndRenderPass(commands_output_[s]);
     if (from_target) {
@@ -11870,6 +12128,11 @@ const std::array<std::pair<const uint32_t*, size_t>, 14> codes_conversion{{
   std::array<VkPipeline, 2> pipelines_ramp_{};
   std::array<bool, 2> pipelines_failed_ramp_{};
   bool warned_bilinear_ramp_ = false;
+  uint64_t copies_outside_destination_ = 0;  // resolves of a tile below their destination texture (CopyInternal)
+  // The exact-texel ramp variant with FXAA (masseffect_native_output_fxaa, PipelineFxaa).
+  VkShaderModule fs_fxaa_ = VK_NULL_HANDLE;
+  VkPipeline pipeline_fxaa_ = VK_NULL_HANDLE;
+  bool pipeline_failed_fxaa_ = false;
   // The game's ramp in 10 bits (red, green, blue). Until the game loads its own, the identity the SDK starts
   // with (i * 1023 / 255).
   std::array<std::array<uint16_t, 3>, 256> ramp_game_ = [] {

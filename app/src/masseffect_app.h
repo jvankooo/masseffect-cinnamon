@@ -142,6 +142,7 @@ class MassEffectApp : public rex::ReXApp {
 #if REX_PLATFORM_SWITCH
     // Official Nintendo 460.8 MHz handheld GPU profile (+50% GPU fillrate); CPU boost mode from masseffect_cpu_boost.
     RexSwitchApmRequestGpuMhz(460);
+    RexSwitchApmAllowRam1600(int(rex::cvar::GetFlagByName("masseffect_switch_ram_1600") == "true"));
     RexSwitchApmApply();
     RexSwitchApmCpuBoost(int(rex::cvar::GetFlagByName("masseffect_cpu_boost") == "1") +
                          int(rex::cvar::GetFlagByName("masseffect_cpu_boost") == "2") * 2);

@@ -12,5 +12,5 @@ c++ -std=c++23 -O2 \
   "$SHADERS/tools/validate_shader_package.cpp" \
   "$ROOT/app/src/native/masseffect/masseffect_shader_library.cpp" \
   $(pkg-config --libs SPIRV-Tools) \
-  -o "$OUT_TOOLS/validate_shader_package"
+  -o "$OUT_TOOLS/validate_shader_package$EXE"
 exec "$OUT_TOOLS/validate_shader_package" "$@"

@@ -402,6 +402,16 @@ class DrawsVulkan {
     (void)base; (void)format; (void)pitch; (void)guest_depth; (void)stencil;
   }
   virtual void NoteSwap() {}
+  // masseffect_native_pipelines_prewarm_blocking (ring thread): the state of the startup pipeline prewarm.
+  // kPrewarmRunning while the game has to wait (`visited` of `total` list records are done or being compiled),
+  // kPrewarmNotReady while the library or the list is not loaded yet (it starts on a later call), kPrewarmNone when
+  // there is nothing to wait for (finished, or no blocking prewarm in this session).
+  static constexpr int kPrewarmNone = 0, kPrewarmRunning = 1, kPrewarmNotReady = 2;
+  virtual int PrewarmBlockingState(uint32_t& visited, uint32_t& total) {
+    (void)visited;
+    (void)total;
+    return kPrewarmNone;
+  }
   // Right before submitting: closes the pass and publishes the upload buffer.
   virtual void BeforeSend() = 0;
   // Starts work in that work slot. Its upload buffer starts over: the GPU has finished the last work

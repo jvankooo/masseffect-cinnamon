@@ -11,8 +11,8 @@ C++, build the graphics driver, build the NRO, build the shader library, and cop
 says what to do and why. If a word is new to you, it is in the [glossary](glossary.md).
 
 Everything here was done on macOS (Apple silicon). The scripts are bash and Python and Linux should work too, but
-nobody has tried it. Windows is not covered: the driver has an MSYS2 script that was never tested with this port's patch
-(see [mesa.md](mesa.md)). All commands are run from the repository root.
+nobody has tried it. A Windows build without Docker was made once (2026-10-24); its differences are in
+[Windows](#windows-native-devkitpro-no-docker) at the end. All commands are run from the repository root.
 
 ## What you need
 
@@ -148,6 +148,9 @@ export XXHASH_DIR="$PWD/sdk/thirdparty/xxHash" FMT_DIR="$PWD/sdk/thirdparty/fmt/
 # 1. containers from the game's Unreal packages (about 30 s for the whole disc, 118 MB of output)
 shaders/tools/build_extra_tools.sh ue3_shader_scan
 find assets/game_root -type f -iname '*.xxx' -print0 | xargs -0 out/tools/ue3_shader_scan run/shaders
+#    plus the Direct3D / Scaleform / Bink shaders the game makes at run time (not on the disc). Without them the logo
+#    movies, menus and HUD stay black (sound only) and the log lists PS=706F57115BB33790, PS=7CA16A6F1E83B4ED, ...
+cp shaders/runtime_containers/*.bin run/shaders/
 
 # 2. containers -> HLSL -> SPIR-V -> package + index (about 6 minutes on a 10-core Mac)
 ALLOW_FAILURES=1 shaders/tools/build_shader_spirv.sh run/shaders run/shaderlib
@@ -200,3 +203,35 @@ include SDK headers need step 1 first. The differential fuzzers of the native re
 
 A different `default.xex` is a different program and needs its own generation and its own NRO. What that takes is in
 [editions.md](editions.md).
+
+## Windows (native devkitPro, no Docker)
+
+Done once, 2026-10-24, on Windows 11 with devkitPro in `C:\devkitPro`, MSYS2 in `C:\msys64` (MINGW64 clang, meson,
+ninja), LLVM in `C:\Program Files\LLVM`, CMake and the Visual Studio 2022 Build Tools (for its `ninja.exe`). In Git Bash
+`python` is Python 3 and `cmd` may be an MSYS2 shim: use `C:\Windows\System32\cmd.exe`.
+
+1. **Libraries**: `tools/fetch_thirdparty.py`, or copy the missing files from another checkout of the same SDK release.
+2. **Generator**: any `rexglue.exe` built from an identical `sdk/src/codegen` works, e.g. a sibling project's
+   `sdk/out/win-amd64/rexglue.exe`: `REXGLUE=/path/to/rexglue.exe PYTHON=python bash tools/codegen.sh`.
+3. **Driver**: a separate mesa-switch checkout (a `git worktree` is enough) at the pinned commit with
+   `mesa-switch-masseffect.patch` applied, built with upstream's `build-unified.sh` from the MSYS2 bash:
+   ```sh
+   MSYSTEM=MINGW64 /c/msys64/usr/bin/bash.exe -lc 'export USERPROFILE="C:\Users\<you>" HOMEDRIVE=C: HOMEPATH="\Users\<you>"
+     export CARGO_HOME=<rust>/cargo RUSTUP_HOME=<rust>/rustup MESA_SWITCH_BINDGEN=<rust>/cargo/bin/bindgen.exe
+     cd <mesa> && ALLOW_DIRTY=1 HOST_CROSS_FILE=$PWD/windows_x64_host_cross_file_mingw64.txt \
+       NATIVE_FILE=$PWD/switch_native_tools_mingw64.txt ./build-unified.sh'
+   ```
+   The patch leaves `build-unified.sh` at `-Doptimization=2`. Without `USERPROFILE` meson's CMake probe stops with
+   "Could not determine home directory"; without `MESA_SWITCH_BINDGEN` the bindgen version check fails. The
+   `*_mingw64.txt` files are the `*_msys2.txt` ones with `C:/msys64/mingw64` instead of `clang64` (and the host
+   `c_args = ['-Wno-error=incompatible-pointer-types']`); the Rust toolchain needs the `aarch64-unknown-linux-gnu`
+   target and bindgen 0.71.1 or newer. About 25 minutes on 20 threads.
+4. **NRO**: `powershell -ExecutionPolicy Bypass -File tools\build_nro.ps1 -MesaSdk <mesa>/mesa-unified-install/opt/devkitpro/portlibs/switch`
+   (same CMake configuration as `build_nro.sh`; it checks the driver for `nvk_switch_draw` and `_start` at 0).
+5. **Shader library**: the `shaders/tools` scripts name their binaries `*.exe` on Windows (`EXE` in `env.sh`). Use
+   LLVM clang++ as `CXX`, `XXHASH_DIR`/`FMT_DIR` from `sdk/thirdparty`, any DXC 1.9 and MSYS2's
+   `C:/msys64/mingw64/bin/spirv-val.exe` (put `/c/msys64/mingw64/bin` first in `PATH` for `validate_shader_package.sh`,
+   or devkitPro's pkg-config is found), and a `python3` that runs Python 3. 2026-10-24: 30,135 containers, 30,135
+   shaders, 0 failures, `invalid=0`, 57 minutes at 8 jobs; then the 298 `shaders/runtime_containers` (forgotten in the first
+   package: black logo movies with sound, then a crash at the title) -> 30,204 shaders. Check a package against console
+   logs with `python tools/check_shader_coverage.py <package> --logs <logs folder>` (needs `pip install xxhash`).

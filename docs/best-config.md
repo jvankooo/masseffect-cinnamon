@@ -353,3 +353,164 @@ windows were in the location tour).
 
 Cause: a cold start compiled the whole prewarm list in the first seconds while the game loaded its startup packages;
 the kernel refused resources (svc::ResultLimitReached 0x10801) to the display queue, the file system and even sysmodules.
+
+## Shipped defaults 2026-10-24 (EN build, Windows toolchain; not yet measured on the console as a set)
+
+| Key | Value | Evidence |
+|---|---|---|
+| `video_mode_width` / `_height` | `800` / `450` (was 960 / 540) | the width must equal the scene width: the prepass skip (`masseffect_native_skip_prepass`, B1 black shards) recognises the scene's depth prepass by `pitch == video_mode_width` |
+| `masseffect_scene_width` / `_height` | `800` / `448` (was 960 / 544) | 2026-10-07 night: 800x448 + FSR, cockpit GPU 36.1 ms per frame against 43.5 at 960x544, picture correct. Widths 801-880 are unusable: the guest pads the surface pitch to 80 pixels, so the scene would share pitch 880 with the 880x880 shadow maps and the prepass test would either miss the prepass or drop shadow draws |
+| `masseffect_native_output_fxaa` | `true` (new, code default false) | FXAA 3.11 quality in the exact-texel output pass, before FSR (`shaders/me_output_fxaa.frag`). Checked headless on a desktop GPU with the renderer's layout: non-edge pixels bit-identical to the exact ramp variant, 0 texels read outside the WxH corner of the 1280x720 front buffer, edges smoothed. Console cost not measured (one 800x448 pass, 5 taps per pixel, up to 18 on edges) |
+| `masseffect_hot_lzo` | `true` (was off) | host fuzz 22,000 streams 0 failures (cpu-cost-analysis.md); guarded at run time like the other natives. Console A/B still pending |
+
+Build-time: `MASSEFFECT_INDIRECT_DISPATCH` stays 0 (as the release workflow builds it), Mesa at `-Doptimization=2` with
+`mesa/mesa-switch-masseffect.patch` (built on Windows, see building.md).
+
+## 2026-10-24 console run 2 (EN, 800x448 + FXAA, new shader package, cold pipeline cache)
+
+Cutscenes and scene changes at 8-13 fps. `rex_profile.log`: the two prewarm threads held 30-50 % of a core each for the
+whole 5-minute session (process at ~280 % of its 300 %), 1,563 pipelines really compiled (~240 ms each while sharing the
+cores; the package's SPIR-V came from another DXC build, so the old cache missed), and the ring compiled 41 list
+pipelines the threads had not reached (77 ms each) plus 179 new ones (30 ms). In heavy cutscenes the ring's texture stage
+was 20.8 of 32.3 us per draw (rechecks: 18-20 MB hashed in hitch frames). GPU busy ~28 ms per Swap with a 14 ms gap.
+
+| Key | Value | Why |
+|---|---|---|
+| `masseffect_native_pipelines_prewarm_blocking` | `true` (new, code default false) | the first Swap waits behind a "PREPARING SHADERS" progress screen until the list is prewarmed by 3 threads at 0x2C, then the cache is saved; nothing compiles in the background during play |
+| `masseffect_native_fingerprints_sample_min_interval` | `4` (was the code default 8) | sampled texture rechecks at the 4-frame cap (measured +28 % draws/s in heavy windows, self-checked; see ring-cpu-per-draw.md) |
+
+## 2026-10-24 console run 3 (EN, 800x448, loader at the first Swap)
+
+The loader prewarmed 4,299 pipelines in 172.5 s (1,354 really compiled, ~361 ms each on 3 threads), then the intro ran at
+28-30 fps (ring 13.7 us per draw, was 32.3). Two problems:
+
+- The logo music played ~0.75 s over a black screen before the loader: the game starts its audio 0.04 s and the movie
+  0.16 s after its D3D init, the first Swap came 0.9 s after it. The loader now holds the game thread in the D3D init
+  (`MeResolutionBefore`, first front-buffer creation, `MeLoaderHoldGame`) and the ring draws it from its idle wake-ups
+  (`ServiceLoader` -> `TargetsVulkan::LoaderFrame`); the Swap-time loader stays as a fallback.
+- Normandy deck: 11 fps with ~3,300 draws per frame (320 occlusion queries per frame), ring 91 %, GPU idle 54 of 90 ms.
+  The scene was drawn with the game's 2x MSAA in two predicated tiles at a 1280 pitch (`C400/f3:1280x1280:mx0my1`,
+  `D000/f1:1280x1280:mx0my1`), its command stream replayed per tile. `masseffect_game_msaa = 0` is now shipped (scene
+  drawn once at 800x448, FXAA for the edges).
+
+## 2026-10-24 console run 4 (EN, 800x448, early loader, game MSAA off; CPU 1224 MHz handheld, GPU 460.8)
+
+Loader: 21.9 s and 7.2 s warm (7 and 11 compiles), no audio before it. Play mostly 30 fps; the Normandy crew area
+16-20 fps at ~1,500 draws per frame (half of run 3's 3,300 with tiling), all three cores busy (ring 85-91 %, game
+thread 60-81 %, UE3 render thread 51-57 %), GPU idle 23 of 53 ms. Character shadow maps there: 12 resolves of the
+864x864 shadow depth per frame (3 in lighter views) and ~27 shadow-slot transfers. A 94 s block with every thread
+silent was the console suspended, not a hang. The clocks differ from every number in these docs (1785 / 768 MHz).
+
+- `masseffect_exec_each_world = "set DynamicLightEnvironmentComponent bCastShadows False"` (new cvar, run in every
+  loaded world): character composite shadows off (draw-count-options.md #2, not measured before).
+- `masseffect_native_fingerprints_sample_min_interval` back to the default: 151 sampled against 3,160 full rechecks per
+  10 s, the sample being computed on top of the full hash.
+
+## 2026-10-24 build for CPU 1224 / GPU 460.8 MHz (the user's clocks; not yet run on the console)
+
+Target: the CPU-bound views of run 4 (all three cores busy, the GPU idle 40 % of the frame). GPU-side options (shadow
+resolution, filter kernels) were left alone: the GPU is not the limit at 800x448.
+
+| Key | Value | Why |
+|---|---|---|
+| `masseffect_exclusive_core` | `22` (was 32) | run 4: the pinned main thread used ~60 % of core 2 while cores 0-1 carried ~190 % |
+| `masseffect_switch_ram_1600` | `true` (new app cvar; the SDK now tries the EMC 1600 configuration first when it is set) | official 0x92220007 (GPU 460.8 + EMC 1600) |
+| `masseffect_exec_each_world` | shadows off, `bUpdateSkelWhenNotRendered False`, DLE `InvisibleUpdateTime 20`, lens flares off, particle `CullDistance 8000` | draw-count-options.md #2, #4, #5; engine-settings-ab.md `skelset`, `dleset` (invisible part only) |
+| `masseffect_ini_override` | `TimeBetweenHWUpdates=30`, `m_fCorpseCleanupFirstAttemptTime=2.0` | external-practices-2.md 1.7, draw-count-options.md #9 |
+
+## 2026-10-25 console run 5 (the build for CPU 1224 / GPU 460.8 MHz)
+
+Gameplay at 30 fps (user), memory at 1600 MHz (0x92220007 accepted), all six per-world SET commands handled in both
+worlds. But the prologue cutscenes rendered black (audio only) and the Eden Prime footage froze on its sky, with
+normal draw counts and no renderer warning: UE3's SET re-attaches every component of the class, Matinee-driven cutscene
+actors included (skeletal meshes, particle systems, light environments, flares). The per-world SET list is removed;
+run 4 (shadows-only SET) had no such report. Character shadows are back, cheaper through the game config:
+`[Engine.Engine] MaxShadowResolution=256` (was 432; shadow depth target 512 -> pitch 560, no collision with the 800
+scene pitch; the renderer's `masseffect_native_shadows_scale` only applies to 1600x1600 maps) and
+`MinShadowResolution=64` (was 32: shadows of characters small on screen are not drawn).
+
+## 2026-10-25 console run 6 (45 min, EN, CPU 1224 / GPU 460.8 MHz) and the build after it
+
+Profile blocks: 114 of 264 at 29+ fps, 79 at 25-29, 57 at 20-25, 14 below 20. Slow blocks are CPU-bound (main thread
+70-88 %, ring 70-88 %, UE3 render thread 40-50 %, ~260 % of 300 %) with the GPU close too: scene ("640") 27-39 ms per
+frame in Eden Prime combat, 67 frames over 100 ms, most of them with ~100 ms of GPU (big effects close up).
+
+- Internal resolution 720x400 (video mode 720x405): 20 % fewer pixels; 720 is whole 80-pixel tiles, not the shadow pitch (560).
+- Game config: `m_fMaxVFXBudget=50` (was 100), `m_fMaxCorpseCleanupScreenSizeThreshold=0.30` (was 0.10),
+  `TimeBetweenPurgingPendingKillObjects=60` (was 30).
+- Gyro aiming (`input_gyro`, SDK switch_input_driver.cpp `ApplyGyro`): six-axis handles per attached layout like the
+  vibration devices; turn rate = angular velocity projected on the low-passed accelerometer "up", tilt = rotation about
+  the controller's X axis; added to the right stick while ZL is held (mode 1). Axis signs not verified on hardware
+  (`input_gyro_invert_x` / `_y`).
+
+## 2026-10-25 turning drop (from run 6) and the build after it
+
+The 15 fps bursts (runs of 62-66 ms frames, 1-15 s, e.g. 01:54:40-01:55:06) had ~32 ms of work-slot fence wait per
+frame and ~35 ms of GPU: CPU and GPU in series. Cause: `masseffect_native_sort_updates_texture` splits the frame into a
+new submission whenever a texture the frame already drew with is replaced (streamed-in 32x32-128x128 textures when a
+new part of the level comes into view); up to ~20 splits per second there, more submissions than the 3 work slots in a
+frame, so Record waited for the GPU on the same frame. New `masseffect_native_inline_texture_updates` (default on)
+records such a replacement in order inside the work command buffer (pass closed, shader-read -> transfer barrier,
+copy, transfer -> shader-read barrier) instead of splitting; the split stays as the fallback.
+
+Also: gyro defaults sensitivity 3.0 (L+R+X / L+R+Y adjust in game; X and Y hidden from the game while L+R are held),
+`input_gyro_min_stick` 9500 (7000 was inside the game's stick deadzone); FXAA subpix 0.5 and
+`present_fsr_sharpness_reduction = 0.1` for crisper HUD text. UI at a separate resolution: not done (UE3 draws the
+HUD into the scene's own render target; separating it needs redirecting UI draws out of the EDRAM surface).
+
+## 2026-10-25 console run 7 (Normandy, CPU 1224 / GPU 460.8 MHz) and the build after it
+
+Inline texture updates work (no frame splits). One viewing direction holds 30 fps at ~150-800 draws per frame; the
+other drops to 20-26 fps at 1,900-2,300 guest draws per frame. There the process's 3 cores are saturated (ring 86-92 %,
+main 74-87 %, UE3 render thread 40-50 %, ~260 % of 300 %), and the GPU is busy ~30 ms per frame (48.7 ms per Swap
+with an 18.5 ms gap). The draw translation itself costs only 7.5-10 us per recorded draw (~12 ms per frame). Most of
+the ring's time is parsing ~40,000 PM4 packets per frame. Of the guest draws, ~1,480 per frame are recorded, ~380 are
+occlusion boxes (mode 0, skipped) and ~430 are the scene depth prepass, which the port drops
+(`masseffect_native_skip_prepass`) after the render thread built it and the ring parsed it.
+
+- New `masseffect_guest_skip_prepass` (default on, `src/native/me_guest_prepass.cpp`): the hook on RenderDPGPrePass
+  (`sub_824F6DB0`, called twice from RenderPrePass `sub_824F6890`, foreground then world) returns FALSE without
+  drawing, so the game no longer builds the prepass. It acts only while `masseffect_native_skip_prepass` is on and
+  `masseffect_native_query_occlusion_depth` is off, so the picture is the same. The two call sites in
+  `masseffect_recomp.17.cpp` call `sub_824F6DB0` again (the address is now in the app sources, so `direct_calls.py`
+  keeps it hookable after a codegen). The occlusion queries are left as they are (query pool and history
+  bookkeeping in `sub_82392F28` / `sub_82392670` / `sub_827E2D10`).
+- Gyro: left/right was reversed on hardware; the turn sign is flipped (`ApplyGyro`, `sx = to_stick(g.yaw)`).
+
+## 2026-10-25 console run 8 (Eden Prime, after the guest prepass hook)
+
+Heavy windows now mostly 27-30 fps (were 20-26 at run 7); the UE3 render thread dropped from 40-50 % to 23-47 %.
+A fire halo showed through rocks and Shepard at the camp (BIOA_PRO10_08, never visited in the earlier runs): not caused
+by the prepass hook (all queries are issued after the prepass and mode 0 answers them "visible" either way) but the
+long-standing mode 0 flare problem. Fixed with `masseffect_flare_occlusion` (occlusion-queries.md section F).
+
+## 2026-10-25 console run 9 (Eden Prime camp) and the build after it
+
+The camp is one of the heaviest places (run 8 there: 21-24 fps at 1,060-1,240 draws per frame; run 9: 19.7-20.5 fps
+at ~1,090, ring 90-92 %, game thread 79-85 %, GPU idle 24-28 ms per frame waiting for the CPU). Per-draw translation
+cost unchanged (11-15 us). Changes: flare history fed from the ring (occlusion-queries.md F); game thread:
+`masseffect_skel_skip_unrendered = true` and `masseffect_dle_visible_every = 2` (code hooks, never measured on the
+console before); `masseffect_native_ring_partition = true` to see where the ring's time goes in the camp.
+
+## 2026-10-25 console run 10 (Eden Prime + new game on the Normandy) and the build after it
+
+- Flares: fixed (`[flare]` reports 30-50 % of the GPU counts 0 = hidden; the user saw the halo hidden).
+- Intro cutscenes black with subtitles: the motion blur pass was rejected (code 109) every frame from the cutscene's
+  first frame on. Its input, UE3's 720x400 k_16_16 velocity resolve, has a 736-wide backing at the 720x400 scene and
+  needs the logical crop; the crop's texel-size table lacked `VK_FORMAT_R16G16_UNORM` (failure 6, InvalidTexelSize),
+  so the crop was refused. Not seen at 800x448 (run 6: 0 rejections, same cutscene). The table now covers every plain
+  color format the renderer creates (`ResolvedTextureForFetch`, masseffect_native_targets.cpp).
+- Ring partition in the Eden Prime camp (98-100 % busy): Vulkan draw ~3.5 s, EDRAM prepare ~2.4 s, textures ~0.6 s,
+  registers ~0.6 s, parse ~0.5 s, pairing ~0.45 s, shader loads ~0.4 s per 10 s.
+- `masseffect_skel_skip_unrendered` back off (stale pose on cutscene camera cuts, no measured gain);
+  `masseffect_dle_visible_every = 2` kept; ring partition off again.
+
+## 2026-10-25 console run 11 (Eden Prime camp, new game on the Normandy) and the build after it
+
+Cutscenes fine, 0 draw rejections. Heavy windows still 20-23 fps at 900-1,250 draws per frame (camp; Normandy deck):
+game thread 80-90 %, ring 76-86 %, UE3 render thread 48-54 % of the 3 cores, GPU idle 19-22 ms per frame. Occlusion
+queries are only 31-61 per frame here (not a lever). Change: size-aware draw distance for small static meshes
+(`masseffect_cull_small_factor` 100, `_max_radius` 256, `_min_distance` 2000; `src/native/me_cull_distance.cpp`,
+post-codegen patch `tools/pch_cull_distance.py` in InitViews `sub_824F50B0`, checked by verify_pch.sh). Report lines:
+`[cull] sample primitive ...: bounds radius R` (the first 8, to confirm the +68 radius offset: plausible radii are
+1-10,000 units) and `[cull] last ~10 s: N static mesh element tests, M with a size-based draw distance`.

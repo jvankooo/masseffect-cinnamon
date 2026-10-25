@@ -14,20 +14,89 @@
 #  Resolution
 # ----------------------------------------------------------------------------
 # Video mode the game believes it is running in (what its own display scaler targets).
-video_mode_width = 960
-video_mode_height = 540
+# Its width must equal the scene width below: the renderer recognises the scene's depth prepass by that surface pitch
+# (masseffect_native_skip_prepass, the black-shards fix).
+video_mode_width = 720
+video_mode_height = 405
 
 # Internal render resolution. The game always renders its scene at 1280x720; the Switch GPU is the
 # bottleneck, so the whole frame (viewport, scene targets, back buffer, UI quad) is drawn smaller and the
 # finished frame is scaled to the screen. 0 = the game's own 1280x720 (slowest, sharpest).
-# The height is 544, not 540, so the render targets stay aligned to the Xbox 360's 32-pixel tiles.
-masseffect_scene_width = 960
-masseffect_scene_height = 544
+# 800x448 (the 480p class): 31 % fewer pixels than the previous 960x544 (cockpit GPU 43.5 -> 36.1 ms per frame on the
+# console, 2026-10-07). The height is a multiple of the 16-pixel EDRAM tile. Widths from 801 to 880 are not safe: the
+# Xbox 360 pads a surface pitch to 80 pixels, so the scene would get pitch 880, the pitch of the 880x880 shadow maps,
+# and the prepass detection above would either miss the prepass (black shards) or take shadow draws for it.
+# 960x544 is the previous default (sharper, slower).
+# 720x400 since 2026-10-25 for a locked 30 at GPU 460.8 MHz: in the long run 6 (Eden Prime, combat) the scene passes
+# took 27-39 ms of GPU per frame at 800x448 and single frames reached ~100 ms of GPU around big effects; 720x400 has 20 %
+# fewer pixels. 720 is a whole number of 80-pixel tiles and differs from the shadow-map pitch (560 with
+# MaxShadowResolution=256). 800x448 = the previous default.
+masseffect_scene_width = 720
+masseffect_scene_height = 400
 
 # How the smaller frame is scaled to the 1280x720 screen: "fsr" = AMD FSR 1 (edge-adaptive upscale + sharpening),
 # clearly sharper than plain "bilinear" at the same frame rate (Switch, Normandy cockpit, 2026-10-07). Needs the
 # NRO built with UPSCALE_SHADERS=ON (the default of tools/build_nro.sh); "cas" = sharpening only.
 present_effect = "fsr"
+# FSR's sharpening pass a little stronger than its default (0.2 stops of reduction; 0 = strongest): HUD and menu text,
+# drawn at the internal resolution with the scene, comes out crisper after the upscale.
+present_fsr_sharpness_reduction = 0.1
+
+# FXAA on the 800x448 frame before FSR enlarges it (app/src/native/masseffect/shaders/me_output_fxaa.frag): the stair
+# steps of edges are smoothed first, so FSR sharpens smooth edges instead of enlarging jagged ones. Pixels that are not
+# on an edge are unchanged. About one extra full-screen pass at 800x448. Can be switched in the settings overlay.
+masseffect_native_output_fxaa = true
+
+# The game's own 2x MSAA with predicated tiling off (the one-byte "Black Shading Fix" of Xenia's ME1 patches). With it
+# on, the scene is drawn into 2x surfaces at a 1280 pitch in two tiles and its whole command stream is replayed once per
+# tile: on the Normandy deck (2026-10-24, 320 occlusion queries per frame) the ring had ~3,300 draws per frame to
+# translate and the game fell to 11 fps with the GPU idle half the time. Off, the scene is drawn once at 800x448,
+# without the 2x <-> 1x depth and colour conversions; FXAA (above) replaces the MSAA edges. 1 = the game's own choice.
+masseffect_game_msaa = 0
+
+# Game thread (~80 % of a core in the Eden Prime camp, 2026-10-25 run 9; the 3 cores are full there). Code hooks,
+# not SET (no component is re-attached, cutscene actors are untouched):
+#  - each character's dynamic light environment updates every 2nd frame (lighting follows one frame late).
+#  - masseffect_skel_skip_unrendered stays off: a character off camera keeps a stale pose until it is drawn again,
+#    which a cutscene camera cut would show for a frame; run 10 showed no measurable gain from it.
+masseffect_dle_visible_every = 2
+
+# Small static meshes (rocks, debris, props; bounds radius up to 256 units) are not drawn beyond 100 x their radius
+# (at least 2000 units): about 5 pixels across at the 400-line scene. The designers set no draw distance on these
+# (CullDistance unset on ~6,100 static meshes), and outdoors they are most of the draws; every draw costs the UE3 render
+# thread, the ring thread and the GPU, and in the heavy views all three cores are full. Characters, effects and large
+# meshes are never culled by this. Lower factor = more culling (more pop-in); 0 = off.
+masseffect_cull_small_factor = 100
+masseffect_cull_small_max_radius = 256
+masseffect_cull_small_min_distance = 2000
+# Measurement only: where the ring thread's time goes, every 10 s (run 10: "Vulkan draw" ~35 % and "EDRAM prepare"
+# ~24 % of the ring in the Eden Prime camp). Off again (1-2 % of the ring).
+# masseffect_native_ring_partition = true
+
+# No per-world SET commands (masseffect_exec_each_world): UE3's SET re-attaches every component of the class in the
+# loaded world, the cutscene actors' too. With skeletal meshes, particle systems, light environments and lens flares
+# in the list (console 2026-10-25 run 5) the prologue cutscenes went black and the Eden Prime footage froze on its sky.
+# masseffect_exec_each_world = ""
+#
+# Game config values (Coalesced.ini, read at load). A key the game config does not have is logged and ignored.
+#  - Character shadows kept, cheaper: each character's composite shadow map is at most 256x256 instead of 432x432
+#    (about a third of the pixels: less GPU and EDRAM transfer work per shadow), and a shadow that would be smaller
+#    than 64 texels (a character small on screen, far away) is not drawn at all instead of below 32. In the crew scenes
+#    of run 4 the game drew ~12 character shadows per frame.
+#  - The audio device updates its voices every 30 ms instead of 15 (the audio thread is ~14 % of a core).
+#  - Dead bodies are cleaned up after 2 s instead of 5 (fewer animated meshes after a fight).
+#  - Combat effects: BioWare's VFX budget (the sum of the cost of the effects alive at once, 1-5 each) 100 -> 50: in big
+#    fights fewer effects run at the same time (CPU on the game and render threads, GPU fill of smoke and fire).
+#  - Garbage collection every 60 s instead of 30: half as many of its main-thread spikes (~800 MB of heap left untouched
+#    in run 6, so the extra garbage between collections fits).
+#  - Dead bodies are removed while they still cover up to 30 % of the screen instead of 10 % (fewer animated meshes).
+masseffect_ini_override = "Engine.Engine:MaxShadowResolution=256|Engine.Engine:MinShadowResolution=64|ISACTAudio.ISACTAudioDevice:TimeBetweenHWUpdates=30|BIOC_Base.BioPawn:m_fCorpseCleanupFirstAttemptTime=2.0|BIOC_Base.BioPawn:m_fMaxCorpseCleanupScreenSizeThreshold=0.30|BIOC_Base.BioWorldInfo:m_fMaxVFXBudget=50.0|Engine.Engine:TimeBetweenPurgingPendingKillObjects=60"
+# Subpixel smoothing (0 = edges only and sharpest, 0.75 = FXAA default, 1 = softest) and the edge contrast threshold
+# (0.063 = every faint edge, 0.125 = high quality, 0.166 = FXAA default).
+# 0.5 since 2026-10-25: FXAA runs on the finished frame with the HUD and menus in it, and less subpixel smoothing keeps
+# their text crisper (edges are still smoothed).
+masseffect_native_output_fxaa_subpix = 0.5
+# masseffect_native_output_fxaa_threshold = 0.125
 
 # Full-screen quads whose vertex positions are packed (16_16, 8_8_8_8, ...) count as proven overwrites, so the
 # EDRAM content under them is not converted first (about 3 ms per frame less GPU time in cutscenes at 960x544,
@@ -69,6 +138,21 @@ masseffect_audio_dsp_native = 1
 
 # Pass the game's rumble to the controllers (off in the code; on here: no frame-rate cost, Therum 2026-10-08).
 input_rumble = true
+
+# Motion (gyro) aiming: turning the console, the right Joy-Con or a Pro Controller turns the camera, tilting it looks up
+# and down; the right stick still works on top. 0 = off, 1 = while ZL (aim / zoom) is held, 2 = always.
+input_gyro = 1
+# Full camera speed at 120 / sensitivity degrees per second of rotation; slower motion than the deadzone is ignored.
+# In game: L + R + X raises it by 0.5, L + R + Y lowers it (0.5-10); the settings overlay (L + R + Right) shows the value
+# and "Save to config" keeps it. 3.0 since 2026-10-25 (1.0 moved the aim too little, especially zoomed in).
+input_gyro_sensitivity = 3.0
+# input_gyro_deadzone = 1.5
+# First stick value past the deadzone: above the game's own stick deadzone (~7850 for Xbox 360 games), so small wrist
+# motions move the aim at all (7000 was inside it).
+input_gyro_min_stick = 9500
+# Flip a direction if it feels reversed (also in the settings overlay, L + R + Right).
+input_gyro_invert_x = false
+input_gyro_invert_y = false
 
 # Touch screen (experimental, handheld only: docked the panel reports no touches). Details and tuning:
 # docs/touchscreen.md. All keys below show the code defaults; input_touch = false switches everything off.
@@ -147,9 +231,15 @@ log_nonblocking = true
 #  Performance (the tested best configuration)
 # ----------------------------------------------------------------------------
 # --- Threads and waiting ---
-# Pin the game's main thread to core 2 (the value is 30 + core) and raise the render thread: it leaves
-# the other cores to the ring, render, audio and worker threads.
-masseffect_exclusive_core = 32
+# Raise the game's render thread to priority 0x2B (20 + core); the main thread is NOT given core 2 for itself any more
+# (that was 30 + core). At CPU 1224 MHz in the busy Normandy views (2026-10-24 run 4) the pinned main thread used ~60 %
+# of core 2 while the ring (91 %), the render thread (57 %) and the rest (~45 %) were squeezed onto cores 0-1: ~40 % of a
+# core stood idle. Unpinned, the scheduler can put that work on core 2 (measured as no worse at 1785 MHz, where the
+# cores were not saturated).
+masseffect_exclusive_core = 22
+# The official handheld configuration "GPU 460.8 MHz + memory 1600 MHz" (0x92220007) instead of memory 1331.2: not an
+# overclock, more battery; the game, render and ring threads spend much of their time in cache misses.
+masseffect_switch_ram_1600 = true
 # The game's Direct3D sleeps while it waits for the ring thread instead of spinning.
 masseffect_wait_blocking_ring = true
 # Occlusion-query polling waits up to this many microseconds for ring progress instead of Sleep(0).
@@ -196,6 +286,10 @@ masseffect_hot_guard_period = 4096
 masseffect_hot_audio_resampler = true
 masseffect_hot_audio_resampler_stereo = true
 masseffect_hot_crt_memset = true
+# Native LZO1X decompressor of the package streaming threads (sub_827D2A00; host fuzz: 22,000 streams, 0 differences;
+# guarded like the others: a DIFFERENCE turns it off). Less CPU while levels stream in and load, on the cores the
+# render and ring threads share (docs/cpu-cost-analysis.md).
+masseffect_hot_lzo = true
 
 # --- Ring thread CPU per draw (exact, self-checking; docs/ring-cpu-per-draw.md rounds 1 and 2) ---
 # Heavy walk windows 14.1k -> 17.1k draws per second, no verification mismatch on the console.
@@ -204,6 +298,10 @@ masseffect_native_load_memo = true
 masseffect_native_load_memo_generation = true
 masseffect_native_edram4_pair_keys = true
 masseffect_native_texture_spread_phase = true
+# Sampled texture rechecks at the 4-frame cap: off again. With texture_coherency = 1 most rechecks are already skipped,
+# and in play only ~5 % of the remaining ones used the sample while the rest computed it on top of the full hash
+# (console 2026-10-24 run 4: 151 sampled against 3,160 full per 10 s).
+# masseffect_native_fingerprints_sample_min_interval = 4
 masseffect_native_edram4_sync_lean = true
 # The periodic VS/PS identity mismatch lines at info instead of warn level (warn flushes the log on the ring thread).
 masseffect_native_mismatch_log_info = true
@@ -266,6 +364,12 @@ masseffect_native_pipelines_shipped_list = "masseffect_prewarm_list.bin"
 # Two threads compile the prewarm list (the second one on a core other than the ring's): the shipped list is done in
 # about half the time.
 masseffect_native_pipelines_prewarm_threads = 2
+# Loading screen instead of background compiles: the first frame waits until the whole list above is prewarmed on
+# every core ("PREPARING SHADERS" and a progress bar), then the cache is saved and play starts with nothing compiling
+# behind it. In the background the two threads held 60-90 % of a core for the whole first quarter hour of play on a
+# cold cache, and cutscenes fell to 8-13 fps (console run 2026-10-24). The first start after an update of the shader
+# package compiles everything (a minute or two); later starts only load the cache (seconds).
+masseffect_native_pipelines_prewarm_blocking = true
 # Pipelines specialized by folded constants are compiled in the background; the draw uses the generic pipeline
 # (same image) until they are ready, so folding no longer adds compiles to the frame (docs/cold-start-hitches.md B).
 masseffect_native_pipelines_async_specialized = 2

@@ -11,8 +11,10 @@ mkdir -p "$OUT_TOOLS"
 EXTRA=()
 # libc++ needs this for std::execution; other standard libraries do not know the flag.
 "$CXX" -x c++ -std=c++20 -fexperimental-library -fsyntax-only /dev/null 2>/dev/null && EXTRA+=(-fexperimental-library)
+# Windows: pch_min.h includes <Windows.h>, whose min/max macros break std::min.
+[ -n "$EXE" ] && EXTRA+=(-DNOMINMAX -D_CRT_SECURE_NO_WARNINGS)
 "$CXX" -std=c++20 -O2 "${EXTRA[@]}" -Wno-switch -Wno-unused-variable -Wno-null-arithmetic -fms-extensions \
   -include "$XENOS/pch_min.h" -I"$SHADERS" -I"$XENOS" -I"$FMT_DIR" -I"$XXHASH_DIR" \
   -DFMT_HEADER_ONLY -DXXH_INLINE_ALL -DMASSEFFECT_RECOMP \
-  "$SHADERS/tools/masseffect_hlsl.cpp" "$XENOS/shader_recompiler.cpp" -o "$OUT_TOOLS/xenos_hlsl"
+  "$SHADERS/tools/masseffect_hlsl.cpp" "$XENOS/shader_recompiler.cpp" -o "$OUT_TOOLS/xenos_hlsl$EXE"
 echo "$OUT_TOOLS/xenos_hlsl"

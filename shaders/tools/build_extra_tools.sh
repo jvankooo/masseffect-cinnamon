@@ -13,10 +13,10 @@ LIB="$ROOT/app/src/native/masseffect/masseffect_shader_library.cpp"
 tools=${*:-extract_shader_package find_shader_microcode repair_vertex_variant_declarations ue3_shader_scan}
 for t in $tools; do
   case $t in
-    extract_shader_package) "$CXX" -std=c++20 -O2 -I"$XXHASH_DIR" "$SHADERS/tools/$t.cpp" "$LIB" -o "$OUT_TOOLS/$t";;
-    find_shader_microcode) "$CXX" -std=c++20 -O2 -I"$XXHASH_DIR" "$SHADERS/tools/$t.cpp" -o "$OUT_TOOLS/$t";;
-    repair_vertex_variant_declarations) "$CXX" -std=c++20 -O2 "$SHADERS/tools/$t.cpp" -o "$OUT_TOOLS/$t";;
-    ue3_shader_scan) "$CXX" -std=c++20 -O2 "$SHADERS/tools/$t.cpp" -o "$OUT_TOOLS/$t";;
+    extract_shader_package) "$CXX" -std=c++20 -O2 -I"$XXHASH_DIR" "$SHADERS/tools/$t.cpp" "$LIB" -o "$OUT_TOOLS/$t$EXE";;
+    find_shader_microcode) "$CXX" -std=c++20 -O2 -I"$XXHASH_DIR" "$SHADERS/tools/$t.cpp" -o "$OUT_TOOLS/$t$EXE";;
+    repair_vertex_variant_declarations) "$CXX" -std=c++20 -O2 "$SHADERS/tools/$t.cpp" -o "$OUT_TOOLS/$t$EXE";;
+    ue3_shader_scan) "$CXX" -std=c++20 -O2 "$SHADERS/tools/$t.cpp" -o "$OUT_TOOLS/$t$EXE";;
     *) echo "unknown tool $t" >&2; exit 1;;
   esac
   echo "$OUT_TOOLS/$t"

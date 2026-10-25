@@ -396,3 +396,30 @@ prepass depth to be useful).
 | mode 1 (all hidden, upper bound) | 300 |
 | mode 2 | 194 |
 | mode 3 (q3_hanshan) | 254-260 in the GPU-bound window (mode 0: 253-258 there), 300 in the last view; ~3 % of results 0 (section E) |
+
+### F. Flare occlusion in mode 0 (`masseffect_flare_occlusion`, default on, 2026-10-25)
+
+Mode 0 answers every query "visible", so lens flares and light glows showed through rocks and characters (Eden
+Prime camp fire, BIOA_PRO10_08; the Feros ceiling flare in image-defects-feros.md 4.2). Only the flare/glow list is
+now measured for real (`src/native/me_flare_occlusion.cpp`):
+
+- InitViews (`sub_824F50B0`) lists the primitives with relevance bit 0x10000000 per view and DPG (View + 996 +
+  12 * DPG). RenderPrePass issues them with `sub_827E2D10(list, RHI, View)`: pooled query, Issue(BEGIN) `sub_82228F58`
+  (flags 2), occlusion sprite `sub_827E2B48(RHI, element + 44)`, Issue(END) (flags 1).
+- That call is postponed to just after the base pass (`sub_824F7020`) of the same DPG: the scene depth then holds
+  every opaque surface (the prepass the console tested against is not drawn by the port).
+- At Issue(BEGIN) the query's end structure (physical, from its first tile entry) is registered; the ring's
+  `ZpdQuery` measures only registered queries (`query_measured_`: mode 2 machinery, per-draw Vulkan occlusion
+  queries, sentinel kept until `ReadOcclusion`), polled like mode 3 (once per ms, no early submission, no timeout).
+- GetData never waits for them: the real count if written, else the element's last real count (key: the sprite data
+  pointer), else 1000. The results come one or two frames late (UE3 itself reads them a frame late).
+- Report every 10 s: `[flare] 10 s: ... queries, ... measured by the ring; answers: ... real (... of them 0 = hidden),
+  ... from the element's last count, ... never measured`. If "measured by the ring" stays 0 the address registration
+  does not match the ring's (the flares then stay visible as before).
+
+Run 9 (2026-10-25): registration matched (1,662 of 1,715 flare queries measured by the ring), but the game reads a
+flare query about a frame after issuing it, before the GPU result exists: only 27 answers in 10 s were real and the
+per-element history, fed only by those, stayed at old "visible" values, so the halo still showed. Now the ring hands
+every measured count to the element's history when it reads it (`FlareResult`; the element comes from a per-address
+FIFO filled at Issue(END), `FlareTakeKey`), and `QueryEnd` carries the key. The address form the ring sees is learned
+at the first match (`address form` in the report). Report: `... N GPU counts fed to the elements (M of them 0 = hidden)`.

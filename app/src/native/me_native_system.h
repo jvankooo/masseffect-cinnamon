@@ -31,6 +31,18 @@ void NoteDrawCall(const uint8_t* base, uint32_t type, uint32_t r5, uint32_t r6, 
 // (src/native/me_ring_wait.cpp, sub_8222FA98).
 void NotifyRingProgress();
 
+// Flare occlusion (src/native/me_flare_occlusion.cpp, masseffect_flare_occlusion with query mode 0).
+// Active: the feature is on. TakeMeasured (ring thread, at a query's BEGIN, with the end structure's physical
+// address): true once for a flare query, which the ring then measures for real. Answer (render thread, GetData of an
+// occlusion query; ready/count: what the original GetData would return): true for a flare query, with the count to give.
+bool FlareOcclusionActive();
+bool FlareTakeMeasured(uint32_t end_address);
+// Ring thread, at a query's END: the element (key) the guest registered for this issue of the end structure, 0 if none.
+uint32_t FlareTakeKey(uint32_t end_address);
+// Ring thread, when the GPU count of a flare query is read (masseffect_native_targets.cpp ReadOcclusion).
+void FlareResult(uint32_t key, uint32_t samples);
+bool FlareAnswer(uint32_t query, bool ready, uint32_t& count);
+
 // Hang watchdog (src/native/me_hang_watchdog.cpp), nothing unless masseffect_hang_watchdog = true.
 // Start: once the guest image is loaded. Interval: the Swaps and draws of each 10-second renderer report.
 void StartHangWatchdog();

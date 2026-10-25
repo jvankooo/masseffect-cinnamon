@@ -62,6 +62,18 @@ REXCVAR_DEFINE_INT32(masseffect_exec_frames, 300, "Mass Effect",
                      "Location tests: frames the player must have a pawn in that world before the commands run")
     .range(1, 100000)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+// Settings, not tests: UE3's SET changes the class default, every loaded object of the class and the archetypes loaded
+// at that moment; an area loaded later brings its own templates and objects. So these commands run again in every
+// world, after each map load (a new GWorld, or a Tick of 1.5 s or more: the load blocks inside one Tick and the
+// allocator can give the new UWorld the old address), once the player has had a pawn there for a few frames.
+REXCVAR_DEFINE_STRING(masseffect_exec_each_world, "", "Mass Effect",
+                      "Game console commands run in every loaded world (again after each map load), separated by "
+                      "'|', e.g. \"set DynamicLightEnvironmentComponent bCastShadows False\"; empty = off")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+REXCVAR_DEFINE_INT32(masseffect_exec_each_world_frames, 30, "Mass Effect",
+                     "Frames the player must have a pawn in a newly loaded world before masseffect_exec_each_world runs")
+    .range(1, 100000)
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 REXCVAR_DEFINE_INT32(masseffect_exec_load_ms, 0, "Mass Effect",
                      "Location tests: after masseffect_exec ran, a game Tick at least this long (ms) counts as the "
                      "arrival in a new map even when GWorld keeps its address (the map load blocks inside one Tick); "
@@ -190,6 +202,60 @@ void RunStage(PPCContext& ctx, uint8_t* base, Stage& stage, uint32_t fexec, cons
   }
 }
 
+// masseffect_exec_each_world: its own world tracking, independent of the one-shot stages above.
+struct EachWorld {
+  std::vector<std::string> commands;
+  uint32_t world = 0;    // GWorld of the last frame
+  uint32_t frames = 0;   // frames with a pawn since the last map load
+  bool pending = true;   // a map was loaded and the commands have not run in it yet
+  uint32_t runs = 0;
+};
+
+EachWorld& GetEachWorld() {
+  static EachWorld e = [] {
+    EachWorld w;
+    w.commands = Split(REXCVAR_GET(masseffect_exec_each_world));
+    if (!w.commands.empty())
+      REXLOG_INFO("[exec] {} command(s) for every loaded world, after {} frames with a pawn", w.commands.size(),
+                  REXCVAR_GET(masseffect_exec_each_world_frames));
+    return w;
+  }();
+  return e;
+}
+
+void EachWorldTick(PPCContext& ctx, uint8_t* base, int64_t tick_ms) {
+  EachWorld& e = GetEachWorld();
+  const uint32_t world = Load32(base, kGWorld);
+  if (world != e.world || tick_ms >= 1500) {
+    e.world = world;
+    e.frames = 0;
+    e.pending = true;
+  }
+  if (!e.pending || !world) return;
+  const uint32_t engine = Load32(base, kGEngine);
+  if (!engine || int32_t(Load32(base, engine + kGamePlayersNum)) <= 0) return;
+  const uint32_t players = Load32(base, engine + kGamePlayersData);
+  const uint32_t player = players ? Load32(base, players) : 0;
+  const uint32_t controller = player ? Load32(base, player + kPlayerActor) : 0;
+  const uint32_t pawn = controller ? Load32(base, controller + kControllerPawn) : 0;
+  if (!pawn) {
+    e.frames = 0;
+    return;
+  }
+  if (++e.frames < uint32_t(REXCVAR_GET(masseffect_exec_each_world_frames))) return;
+  e.pending = false;
+  const uint32_t fexec = player + kPlayerFExec;
+  const uint32_t vtable = Load32(base, fexec);
+  if (!vtable || Load32(base, vtable) != kLocalPlayerExec) return;
+  ++e.runs;
+  for (const std::string& command : e.commands) {
+    const uint32_t handled = RunCommand(ctx, base, fexec, command);
+    if (e.runs <= 32)
+      REXLOG_INFO("[exec] every world (#{} in GWorld {:08X}): \"{}\" -> {}", e.runs, world, command,
+                  handled ? "handled" : "not handled");
+  }
+}
+
 }  // namespace
 
 namespace me::exec {
@@ -209,15 +275,17 @@ REX_HOOK_RAW(sub_825E6978) {
   const int32_t load_ms = REXCVAR_GET(masseffect_exec_load_ms);
   const bool timed = s.configured && s.first.done && !s.arrival.done && load_ms > 0;
   const bool tour = me::tour::Enabled();
+  const bool each = !GetEachWorld().commands.empty();
   const auto tick_start =
-      timed || tour ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
+      timed || tour || each ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point();
   __imp__sub_825E6978(ctx, base);
   const int64_t ms =
-      timed || tour
+      timed || tour || each
           ? int64_t(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - tick_start)
                         .count())
           : 0;
   me::tour::Tick(ctx, base, ms, s.first.done);
+  if (each) EachWorldTick(ctx, base, ms);
   if (!s.configured || (s.first.done && s.arrival.done)) return;
   if (timed) {
     if (ms >= load_ms) {

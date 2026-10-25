@@ -123,6 +123,14 @@ class TargetsNative {
   virtual bool Present(rex::ui::Presenter* presenter, const TextureSwap& swap, uint32_t width,
                          uint32_t height) = 0;
 
+  // masseffect_native_pipelines_prewarm_blocking, from the ring while the game thread waits in its D3D init (before
+  // its audio and movies start): advances the startup pipeline prewarm and draws the progress screen. Returns the
+  // DrawsVulkan::kPrewarm* state (kPrewarmNone: the game can go on).
+  virtual int LoaderFrame(rex::ui::Presenter* presenter) {
+    (void)presenter;
+    return 0;
+  }
+
   // 256-entry gamma ramp loaded by the game, 10 bits per channel (red, green, blue). Subsequent outputs
   // apply it the way the Xbox 360 display does. Called from the same thread as Present.
   virtual void RampGamma(const std::array<std::array<uint16_t, 3>, 256>& ramp) = 0;
@@ -156,8 +164,10 @@ class TargetsNative {
   // The guest query ends with `draws` draws issued inside it. true: the end structure at `address` keeps the
   // D3D sentinel and gets the real count (x scale) once the GPU has it, or "visible" on failure or timeout.
   // false: nothing is pending, the caller writes the fallback now.
-  virtual bool QueryEnd(uint32_t address, uint32_t draws, double scale, uint32_t visible) {
-    (void)address, (void)draws, (void)scale, (void)visible;
+  // flare_key (mode 0 flare queries, me_flare_occlusion.cpp): the measured count is also handed to
+  // me::native::FlareResult under this key, even when the guest end structure no longer wants it.
+  virtual bool QueryEnd(uint32_t address, uint32_t draws, double scale, uint32_t visible, uint32_t flare_key = 0) {
+    (void)address, (void)draws, (void)scale, (void)visible, (void)flare_key;
     return false;
   }
   // The guest issues the query at this end structure again: a result still pending for it is dropped.

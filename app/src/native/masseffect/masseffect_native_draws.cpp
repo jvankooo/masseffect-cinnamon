@@ -86,6 +86,18 @@ REXCVAR_DEFINE_BOOL(masseffect_native_gpu_labels, false, "Mass Effect",
                     "Diagnostic GPU draw labels: shader fingerprints, target and draw number");
 REXCVAR_DEFINE_BOOL(masseffect_native_sort_updates_texture, true, "Mass Effect",
                     "Submit earlier draws before replacing an already uploaded texture's texels");
+/*
+ * masseffect_native_inline_texture_updates: the replacement of an already uploaded texture is recorded in order, in the
+ * work command buffer between the draws that read the old texels and those that read the new ones (pass closed, a
+ * barrier after the earlier reads, the copy, a barrier before the later reads), instead of submitting the frame so far
+ * and continuing in the next work slot. Same result. The split cost a submission each: when the game streams in small
+ * textures that the frame already drew with (turning towards another part of a level), console run 6 (2026-10-25) had
+ * up to ~20 of them per second, more submissions than the 3 work slots in one frame, and the ring then waited for the
+ * GPU to finish that same frame: CPU and GPU in series, ~62-66 ms frames (15 fps) with ~32 ms of fence wait each.
+ */
+REXCVAR_DEFINE_BOOL(masseffect_native_inline_texture_updates, true, "Mass Effect",
+                    "Replace an already used texture's texels in order inside the frame's work instead of splitting the "
+                    "frame into another submission (masseffect_native_sort_updates_texture)");
 
 #include <arm_neon.h>
 
@@ -3771,8 +3783,15 @@ class DrawsVulkanImpl final : public DrawsVulkan {
     // Split before acquiring the render pass / command buffer or allocating this
     // draw's constants. New images can still be uploaded in the leading buffer.
     if (used_upload_ && REXCVAR_GET(masseffect_native_sort_updates_texture)) {
-      for (const Texture* texture : textures_to_upload_) {
+      for (Texture* texture : textures_to_upload_) {
         if (!texture->needs_upload || !texture->image.prepared) continue;
+        // masseffect_native_inline_texture_updates: in order inside this submission when it can be (not an image whose
+        // memory is still being bound on the bind thread, and room in the upload buffer); else the split below.
+        VkDeviceSize bytes_inline = 0;
+        if (inline_texture_updates_ && UploadTextureInline(*texture, bytes_inline)) {
+          bytes_textures -= std::min(bytes_textures, bytes_inline);  // already in the upload buffer
+          continue;
+        }
         if (++me_ordered_updates_ <= 16 || (me_ordered_updates_ & 255) == 0) {
           REXLOG_INFO("[native] ME texture update ordering: split {} before replacing {:08X} "
                       "{}x{} (command generation {})",
@@ -6288,6 +6307,7 @@ class DrawsVulkanImpl final : public DrawsVulkan {
     util_height_memo_active_ = REXCVAR_GET(masseffect_native_util_height_memo) && !util_height_memo_off_;
     key_fast_pass_ = REXCVAR_GET(masseffect_native_key_fast_pass) && !key_fast_off_pass_;
     cvars_per_frame_ = REXCVAR_GET(masseffect_native_cvars_per_frame);
+    inline_texture_updates_ = REXCVAR_GET(masseffect_native_inline_texture_updates);
     ps_alpha_only_frame_ = PsAlphaOnly();
     no_ps_no_color_frame_ = NoPsNoColor();
     no_vegetation_ = REXCVAR_GET(masseffect_shadows_no_vegetation);
@@ -11057,6 +11077,48 @@ class DrawsVulkanImpl final : public DrawsVulkan {
     return true;
   }
 
+  // masseffect_native_inline_texture_updates: replaces the texels of a texture this submission's earlier draws already
+  // sampled, in order in the work command buffer (see the cvar). false (nothing recorded) when it cannot: the image
+  // is still being bound on the bind thread, or the upload buffer has no room left (the caller then splits).
+  // `bytes` = what the draw counted for this texture in its upload space.
+  bool UploadTextureInline(Texture& texture, VkDeviceSize& bytes) {
+    if (texture.in_flight || texture.image.image == VK_NULL_HANDLE || !texture.image.prepared) return false;
+    bytes = (texture.data.size() + 3) & ~size_t(3);
+    VkDeviceSize offset;
+    if (!Reserve(texture.data.size(), 16, offset)) return false;  // BC: offset multiple of the block
+    FinishPass();  // a copy cannot be recorded inside a render pass
+    const VkCommandBuffer work = context_->CommandsWork();
+    if (!work) return false;
+    std::memcpy(upload_data_ + offset, texture.data.data(), texture.data.size());
+    // The earlier draws of this submission (and any earlier copy into it) are done with the old texels.
+    VkMemoryBarrier before{};
+    before.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    before.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    before.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    dfn_.vkCmdPipelineBarrier(work,
+                              VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                  VK_PIPELINE_STAGE_TRANSFER_BIT,
+                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &before, 0, nullptr, 0, nullptr);
+    RecordCopyTexture(work, texture, offset);
+    // The later draws read the new ones.
+    VkMemoryBarrier after{};
+    after.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    after.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    after.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT;
+    dfn_.vkCmdPipelineBarrier(work, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                              VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
+                                  VK_PIPELINE_STAGE_TRANSFER_BIT,
+                              0, 1, &after, 0, nullptr, 0, nullptr);
+    texture.needs_upload = false;
+    StagingRelease(texture.data);
+    ++uploads_texture_;
+    if (++inline_texture_updates_count_ <= 4 || (inline_texture_updates_count_ & 1023) == 0)
+      REXLOG_INFO("[native] texture update {} recorded in order inside the frame (masseffect_native_inline_texture_"
+                  "updates): {:08X} {}x{}, no extra submission",
+                  inline_texture_updates_count_, texture.address, texture.image.width, texture.image.height);
+    return true;
+  }
+
   bool UploadTexture(Texture& texture) {
     const VkCommandBuffer upload = context_->CommandsUpload();
     if (!upload || !texture.needs_upload) {
@@ -14441,9 +14503,13 @@ class DrawsVulkanImpl final : public DrawsVulkan {
     prewarmed_library_ = library;
     prewarmed_eds_ = eds_mode_;  // the ring would not request those of another dynamic state mode
     prewarmed_start_ = std::chrono::steady_clock::now();
+    // masseffect_native_pipelines_prewarm_blocking: the game waits for the list (PrewarmBlockingProgress), so every
+    // core compiles it at once.
+    prewarm_blocking_ = REXCVAR_GET(masseffect_native_pipelines_prewarm_blocking);
     // masseffect_native_pipelines_prewarm_threads: every thread claims the next record of the list; the records
     // done are published in order (prewarmed_until_) by PrewarmPublish.
-    const uint32_t threads = uint32_t(std::clamp(REXCVAR_GET(masseffect_native_pipelines_prewarm_threads), 1, 3));
+    const uint32_t threads =
+        prewarm_blocking_ ? 3u : uint32_t(std::clamp(REXCVAR_GET(masseffect_native_pipelines_prewarm_threads), 1, 3));
     prewarm_done_flags_ = std::make_unique<std::atomic<uint8_t>[]>(std::max<size_t>(file_list_.size(), 1));
     for (size_t i = 0; i < file_list_.size(); ++i) prewarm_done_flags_[i].store(0, std::memory_order_relaxed);
     const int ring_core = RexSwitchCurrentCore();
@@ -14489,8 +14555,9 @@ class DrawsVulkanImpl final : public DrawsVulkan {
     int32_t priority = -1;
     // The lowest priority the system accepts, and never above the guest's (0x3B): compiling at the priority
     // threads are born with would take the core from the game and the ring. If none is accepted, nothing is
-    // compiled. masseffect_native_pipelines_prewarm_priority asks for another one first.
-    const int32_t wanted = REXCVAR_GET(masseffect_native_pipelines_prewarm_priority);
+    // compiled. masseffect_native_pipelines_prewarm_priority asks for another one first. Blocking prewarm: the game
+    // is waiting for these threads, so they take the ring's priority (0x2C) and no delay.
+    const int32_t wanted = prewarm_blocking_ ? 0x2C : REXCVAR_GET(masseffect_native_pipelines_prewarm_priority);
     if (wanted >= 0 && RexSwitchSetCurrentThreadPriorityOk(int(wanted))) priority = wanted;
     for (const int32_t candidate : {0x3F, 0x3E, 0x3D, 0x3C, 0x3B}) {
       if (priority >= 0) break;
@@ -14506,7 +14573,7 @@ class DrawsVulkanImpl final : public DrawsVulkan {
       return;
     }
     // masseffect_native_pipelines_prewarm_delay_s: leave the startup to the game first.
-    for (int32_t waited = 0, delay = REXCVAR_GET(masseffect_native_pipelines_prewarm_delay_s) * 10;
+    for (int32_t waited = 0, delay = prewarm_blocking_ ? 0 : REXCVAR_GET(masseffect_native_pipelines_prewarm_delay_s) * 10;
          waited < delay && !prewarmed_stop_.load(std::memory_order_relaxed); ++waited) {
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
@@ -14975,6 +15042,31 @@ class DrawsVulkanImpl final : public DrawsVulkan {
   }
 
   void NoteSwap() override { ++swaps_seen_; }
+
+  // masseffect_native_pipelines_prewarm_blocking, on the ring: from the startup loader (the game thread waits in its
+  // D3D init, me_native_system.cpp ServiceLoader) and from the Swap as a fallback. Starts the prewarm as soon as the
+  // library and the list are loaded (TryPrewarm is otherwise first called after a frame), and once the threads are
+  // done saves the cache, so a warm start or a HOME exit right after keeps what was compiled.
+  int PrewarmBlockingState(uint32_t& visited, uint32_t& total) override {
+    TryPrewarm();
+    if (!prewarmed_decided_) return kPrewarmNotReady;
+    if (!prewarm_blocking_ || prewarm_blocking_done_ || !prewarmed_thread_.joinable()) return kPrewarmNone;
+    total = uint32_t(file_list_.size());
+    visited = uint32_t(std::min<size_t>(prewarm_next_.load(std::memory_order_relaxed), file_list_.size()));
+    if (!prewarmed_finished_.load(std::memory_order_acquire)) return kPrewarmRunning;
+    prewarm_blocking_done_ = true;
+    const uint32_t compiled = prewarmed_compiled_.load(std::memory_order_relaxed);
+    REXLOG_INFO("[native] C6 prewarm (blocking): {} pipelines prewarmed in {:.1f} s before the game started, {} of them "
+                "really compiled",
+                prewarmed_done_.load(std::memory_order_relaxed),
+                std::chrono::duration<double>(std::chrono::steady_clock::now() - prewarmed_start_).count(), compiled);
+    if (compiled != prewarmed_counted_) {
+      pipelines_no_save_ += compiled - prewarmed_counted_;
+      prewarmed_counted_ = compiled;
+      SaveCachePipelines();
+    }
+    return kPrewarmNone;
+  }
 
   // Every 10 s with the other ring reports.
   void ReportOcclusionDepth() {
@@ -15460,6 +15552,8 @@ class DrawsVulkanImpl final : public DrawsVulkan {
   std::array<bool, 1024> seen_biases_{};
   std::vector<Texture*> textures_to_upload_;
   uint64_t me_ordered_updates_ = 0;
+  bool inline_texture_updates_ = true;         // masseffect_native_inline_texture_updates (read every frame)
+  uint64_t inline_texture_updates_count_ = 0;  // texture updates recorded in order instead of a split
   std::vector<uint8_t> temporal_;
   // Staging pool (StagingReserve / StagingRelease, docs/memory-growth.md) and its counters.
   std::vector<std::vector<uint8_t>> staging_spare_;
@@ -16242,6 +16336,10 @@ class DrawsVulkanImpl final : public DrawsVulkan {
   const ShadersNative* prewarmed_library_ = nullptr;
   uint32_t prewarmed_eds_ = 0;
   bool prewarmed_decided_ = false;
+  // masseffect_native_pipelines_prewarm_blocking: set by TryPrewarm before the threads start (they read it);
+  // _done_ once PrewarmBlockingProgress let the first frame go (ring only).
+  bool prewarm_blocking_ = false;
+  bool prewarm_blocking_done_ = false;
   bool prewarmed_difference_ = false;
   std::chrono::steady_clock::time_point prewarmed_start_{};
   std::chrono::steady_clock::time_point prewarmed_report_{};

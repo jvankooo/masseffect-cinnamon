@@ -34,6 +34,9 @@ set(MASSEFFECT_SOURCES
     src/native/me_switch_minigame.cpp
     src/native/me_ini_override.cpp
     src/native/me_crowd_cpu.cpp
+    src/native/me_guest_prepass.cpp
+    src/native/me_flare_occlusion.cpp
+    src/native/me_cull_distance.cpp
     src/native/me_resolution.cpp
     src/native/me_physx.cpp
     src/native/me_audio_hooks.cpp
@@ -74,11 +77,11 @@ else()
     set(MASSEFFECT_GENERATED_SHADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated-shaders")
 endif()
 set(MASSEFFECT_EDRAM_SHADER_INCLUDES)
-foreach(_shader masseffect_edram_7e3_to_rgba8 masseffect_edram_rgba8_to_7e3 masseffect_edram_16f_to_16f me_resolve_exp_bias me_edram_depth_to_rgba8 me_edram_depth_to_16f me_edram_import me_edram_color_to_depth me_edram_depth_to_depth me_edram_depth_to_stencil me_edram_color_to_stencil me_edram_depth_to_depth_msaa2 me_edram_depth_msaa2_to_depth_1x me_edram_depth_to_stencil_msaa2 me_edram_depth_msaa2_to_stencil_1x me_edram_raw64_to_rgba8 me_edram_rgba8_to_raw64 me_edram_raw64_to_16f me_edram_16f_to_raw64 me_edram_raw64_to_raw64 me_edram_depth_to_raw64 me_edram_raw64_to_depth me_depth_resolve_guestspace me_depth_resolve_guestspace_msaa2 me_edram_stencil_to_buffer me_edram_stencil_msaa2_to_buffer me_edram_color_stencil_to_buffer me_edram_color_to_color me_edram_r64_to_r64 me_edram_r16g16_to_rgba8 me_edram_rgba8_to_r16g16 me_edram_r16g16_to_16f me_edram_16f_to_r16g16 me_resolve_7e3_to_unorm10 me_resolve_exp_bias_frag me_resolve_7e3_to_unorm10_frag me_resolve_7e3_word_frag me_resolve_fixed16_frag)
+foreach(_shader masseffect_edram_7e3_to_rgba8 masseffect_edram_rgba8_to_7e3 masseffect_edram_16f_to_16f me_resolve_exp_bias me_edram_depth_to_rgba8 me_edram_depth_to_16f me_edram_import me_edram_color_to_depth me_edram_depth_to_depth me_edram_depth_to_stencil me_edram_color_to_stencil me_edram_depth_to_depth_msaa2 me_edram_depth_msaa2_to_depth_1x me_edram_depth_to_stencil_msaa2 me_edram_depth_msaa2_to_stencil_1x me_edram_raw64_to_rgba8 me_edram_rgba8_to_raw64 me_edram_raw64_to_16f me_edram_16f_to_raw64 me_edram_raw64_to_raw64 me_edram_depth_to_raw64 me_edram_raw64_to_depth me_depth_resolve_guestspace me_depth_resolve_guestspace_msaa2 me_edram_stencil_to_buffer me_edram_stencil_msaa2_to_buffer me_edram_color_stencil_to_buffer me_edram_color_to_color me_edram_r64_to_r64 me_edram_r16g16_to_rgba8 me_edram_rgba8_to_r16g16 me_edram_r16g16_to_16f me_edram_16f_to_r16g16 me_resolve_7e3_to_unorm10 me_resolve_exp_bias_frag me_resolve_7e3_to_unorm10_frag me_resolve_7e3_word_frag me_resolve_fixed16_frag me_output_fxaa)
     set(_extension comp)
     if(_shader STREQUAL "me_edram_import")
         set(_extension vert)
-    elseif(_shader STREQUAL "me_edram_color_to_depth" OR _shader STREQUAL "me_edram_depth_to_depth" OR _shader STREQUAL "me_edram_depth_to_stencil" OR _shader STREQUAL "me_edram_color_to_stencil" OR _shader STREQUAL "me_edram_depth_to_depth_msaa2" OR _shader STREQUAL "me_edram_depth_msaa2_to_depth_1x" OR _shader STREQUAL "me_edram_depth_to_stencil_msaa2" OR _shader STREQUAL "me_edram_depth_msaa2_to_stencil_1x" OR _shader STREQUAL "me_edram_raw64_to_depth" OR _shader STREQUAL "me_edram_color_to_color" OR _shader STREQUAL "me_edram_r64_to_r64" OR _shader STREQUAL "me_resolve_exp_bias_frag" OR _shader STREQUAL "me_resolve_7e3_to_unorm10_frag" OR _shader STREQUAL "me_resolve_7e3_word_frag" OR _shader STREQUAL "me_resolve_fixed16_frag")
+    elseif(_shader STREQUAL "me_edram_color_to_depth" OR _shader STREQUAL "me_edram_depth_to_depth" OR _shader STREQUAL "me_edram_depth_to_stencil" OR _shader STREQUAL "me_edram_color_to_stencil" OR _shader STREQUAL "me_edram_depth_to_depth_msaa2" OR _shader STREQUAL "me_edram_depth_msaa2_to_depth_1x" OR _shader STREQUAL "me_edram_depth_to_stencil_msaa2" OR _shader STREQUAL "me_edram_depth_msaa2_to_stencil_1x" OR _shader STREQUAL "me_edram_raw64_to_depth" OR _shader STREQUAL "me_edram_color_to_color" OR _shader STREQUAL "me_edram_r64_to_r64" OR _shader STREQUAL "me_resolve_exp_bias_frag" OR _shader STREQUAL "me_resolve_7e3_to_unorm10_frag" OR _shader STREQUAL "me_resolve_7e3_word_frag" OR _shader STREQUAL "me_resolve_fixed16_frag" OR _shader STREQUAL "me_output_fxaa")
         set(_extension frag)
     endif()
     set(_source "${CMAKE_CURRENT_SOURCE_DIR}/src/native/masseffect/shaders/${_shader}.${_extension}")

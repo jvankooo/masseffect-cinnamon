@@ -114,10 +114,14 @@ proper fix (hook after the sub-step count) was not made.
 
 ### 11. Resolution limits (open)
 
-- Only 960x544 works with the fast paths and the UI; 800x448 and 800x450 are slower (off the 16-pixel tile grid) and the
-  title menu did not draw at 800x448 (the Scaleform stage was not scaled; fixed only for 960x544).
-- The image is softer than 1280x720 and the post chain runs at 1280x720 anyway.
-- The HUD markers' world-to-screen Y is scaled for 960x544; other sizes are not tested.
+- The early 800x448 and 800x450 runs (t182, t188, t259) were slower and the title menu did not draw (the Scaleform stage
+  was not scaled). The UI viewport, the Scaleform quad and the HUD world-to-screen scale are now computed from
+  `masseffect_scene_width`/`_height` (me_resolution.cpp), and the 2026-10-07 night run at 800x448 + FSR rendered
+  correctly with less GPU time than 960x544; 800x448 is the default since 2026-10-24 (best-config.md).
+- The scene width must equal `video_mode_width` and must not fall in 801-880 (the scene would get the pitch of the 880x880
+  shadow maps; see the resolution comments in app/masseffect.toml).
+- The image is softer than 1280x720 (FXAA before the FSR upscale since 2026-10-24) and the post chain runs at 1280x720 anyway.
+- The HUD markers' world-to-screen Y scale (720 / H) was checked on the console at 960x544 only.
 
 ### 12. Saved graphics options (not verified)
 

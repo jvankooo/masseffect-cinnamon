@@ -529,7 +529,14 @@ REX_HOOK_RAW(sub_82229158) {
     const uint32_t device = query ? Load32(base, query) : 0;
     if (device && out && Load32(base, query + 4) == kQueryTypeOcclusion && !(Load8(base, device + kOffState) & 0x04)) {
       uint32_t count = 0;
-      if (!OriginalOcclusionAnswer(base, query, device, count)) {
+      const bool ready = OriginalOcclusionAnswer(base, query, device, count);
+      // A flare query measured by the ring (me_flare_occlusion.cpp): its real count, or its element's last one.
+      if (me::native::FlareAnswer(query, ready, count)) {
+        Store32(base, out, count);
+        ctx.r3.u64 = 0;  // S_OK
+        return;
+      }
+      if (!ready) {
         g_getdata.not_ready.fetch_add(1, std::memory_order_relaxed);
       } else if (count != kQueryVisibleSamples) {
         g_getdata.other.fetch_add(1, std::memory_order_relaxed);

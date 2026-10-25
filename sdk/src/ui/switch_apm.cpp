@@ -57,8 +57,10 @@
 
 #include <switch.h>
 
+#include <array>
 #include <atomic>
 #include <cstdio>
+#include <iterator>
 
 namespace {
 
@@ -248,8 +250,21 @@ extern "C" void RexSwitchApmApply(void) {
    * They are tried in table order (low EMC first) and the first one that raises the GPU without
    * moving the memory is accepted. The check is the 1.5 s poll, not a single read: a read at 250 ms
    * once said the memory was still at 1331.2, and one second later it was at 1600.
+   *
+   * With masseffect_switch_ram_1600 the EMC 1600 configuration of the same GPU clock is tried first (an official
+   * apm configuration like the others; it only costs battery). For a CPU-bound frame the faster memory
+   * shortens the cache misses of the game, render and ring threads.
    */
-  for (const Candidate& c : kCandidate) {
+  const bool prefer_1600 = g_allow_ram_1600.load(std::memory_order_relaxed);
+  std::array<Candidate, std::size(kCandidate)> order{};
+  size_t n_order = 0;
+  if (prefer_1600)
+    for (const Candidate& c : kCandidate)
+      if (c.emc == 1600) order[n_order++] = c;
+  for (const Candidate& c : kCandidate)
+    if (!prefer_1600 || c.emc != 1600) order[n_order++] = c;
+  for (size_t i = 0; i < n_order; ++i) {
+    const Candidate& c = order[i];
     if (c.mhz != mhz) {
       continue;
     }

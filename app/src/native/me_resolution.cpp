@@ -50,6 +50,12 @@ REXCVAR_DEFINE_INT32(masseffect_exclusive_core, -1, "Mass Effect",
     .range(-1, 32)
     .lifecycle(rex::cvar::Lifecycle::kInitOnly);
 
+REXCVAR_DEFINE_BOOL(masseffect_switch_ram_1600, false, "Mass Effect",
+                    "Switch handheld: request the official GPU 460.8 MHz configuration with the memory at 1600 MHz "
+                    "(0x92220007) instead of 1331.2 (0x92220008). Not an overclock; more battery. Helps a CPU-bound "
+                    "frame (faster cache misses)")
+    .lifecycle(rex::cvar::Lifecycle::kInitOnly);
+
 REXCVAR_DEFINE_INT32(masseffect_cpu_boost, 0, "Mass Effect",
                      "Switch: appletSetCpuBoostMode (0 off, 1 FastLoad: CPU 1785 MHz but the GPU throttled to its "
                      "minimum by the system, 2 Type2); diagnostic, see RexSwitchApmCpuBoost")
@@ -188,7 +194,12 @@ REX_HOOK_RAW(sub_823D0118) {
 // (render target r3 x r4, created from 0x826E5ABC) and the front buffer texture (r3 x r4, from 0x826E5AEC)
 // the back buffer is resolved into at Present. src/me_d3d_trace.cpp already hooks these three functions, so
 // its wrappers call this before the original.
+void MeLoaderHoldGame();  // me_native_system.cpp (masseffect_native_pipelines_prewarm_blocking)
+
 void MeResolutionBefore(uint32_t address, PPCContext& ctx, uint8_t* base) {
+  // The startup loader holds the game here, at the D3D init's front buffer: after the device and the back buffer
+  // exist (the ring has its renderer), before the game starts its audio and the logo movies.
+  if (address == 0x82224528 && ctx.lr == 0x826E5AEC) MeLoaderHoldGame();
   static std::atomic<uint32_t> logged{0};
   if (logged.fetch_add(1, std::memory_order_relaxed) < 8)
     REXLOG_INFO("[native] internal resolution: D3D call {:08X} r3 {:08X} r4 {:08X} lr {:08X}", address, ctx.r3.u32,

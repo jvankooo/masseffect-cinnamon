@@ -183,12 +183,15 @@ meshes in the three areas), and the depth prepass is fully on (#1) although the 
 
 ## 4. Beyond settings (if the variants confirm the direction)
 
-- **Size-aware cull distance** (a code hook, not a setting): UE3's later `CullDistanceVolume` sets `CullDistance` by
+- **Size-aware cull distance** (done 2026-10-25 as `masseffect_cull_small_*`, at the per-element distance test in
+  InitViews rather than at attach; see best-config.md run 11) (a code hook, not a setting): UE3's later `CullDistanceVolume` sets `CullDistance` by
   bounds size (small props near, large meshes never). A hook at component attach (`UPrimitiveComponent::Attach` /
   scene-info creation) could do the same for `StaticMeshComponent` with a radius table, avoiding #3's risk of
   vanishing large meshes.
 - **Drop the prepass at the source** in the guest (patch the prepass call in the scene renderer) if `SET` cannot
   reach the static draw lists: same effect as #1 without relying on `SET`.
+  Done 2026-10-25: `masseffect_guest_skip_prepass` (default on) hooks RenderDPGPrePass `sub_824F6DB0`
+  (`src/native/me_guest_prepass.cpp`).
 
 ## 5. Open points
 

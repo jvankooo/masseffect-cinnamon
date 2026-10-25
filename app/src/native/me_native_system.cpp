@@ -83,6 +83,45 @@ REXCVAR_DECLARE(bool, masseffect_vblank_sleep_exact);  // me_audio_hooks.cpp
 REXCVAR_DECLARE(int32_t, masseffect_scene_width);   // me_resolution.cpp
 REXCVAR_DECLARE(int32_t, masseffect_scene_height);  // me_resolution.cpp
 REXCVAR_DECLARE(int32_t, masseffect_scene_parts);   // me_resolution.cpp
+REXCVAR_DECLARE(bool, masseffect_native_pipelines_prewarm);           // masseffect_pipelines_cold_cvars.inc
+REXCVAR_DECLARE(bool, masseffect_native_pipelines_prewarm_blocking);  // masseffect_pipelines_cold_cvars.inc
+
+/*
+ * Startup loader (masseffect_native_pipelines_prewarm_blocking).
+ *
+ * Holding the game at its first Swap was too late: by then its audio was running and the logo movie had played its
+ * first ~0.75 s of music over a black screen (console run 2026-10-24: audio at +0.04 s after the D3D init, the movie
+ * at +0.16 s, the first Swap at +0.9 s). So the game thread waits in its own D3D init instead, at the first creation of
+ * the front buffer (MeResolutionBefore, after the device and the back buffer, before the audio starts), and the ring
+ * thread, which has the renderer and the presenter and is otherwise idle there, runs the prewarm and draws the
+ * progress screen from its 5 ms wake-ups (ServiceLoader) until the list is done; then it lets the game go on.
+ */
+namespace {
+std::mutex g_loader_mutex;
+std::condition_variable g_loader_cv;
+// 0: no hold (yet); 1: the game thread waits for the ring's loader; 2: released (also when there is nothing to wait for).
+std::atomic<int> g_loader_hold{0};
+}  // namespace
+
+void MeLoaderHoldGame() {
+  if (!REXCVAR_GET(masseffect_native_pipelines_prewarm_blocking) || !REXCVAR_GET(masseffect_native_pipelines_prewarm))
+    return;
+  int expected = 0;
+  if (!g_loader_hold.compare_exchange_strong(expected, 1, std::memory_order_acq_rel)) return;  // only the first time
+  REXLOG_INFO("[native] startup loader: the game waits in its D3D init while the ring prewarms the pipelines");
+  const auto start = std::chrono::steady_clock::now();
+  {
+    std::unique_lock<std::mutex> lock(g_loader_mutex);
+    // The ring releases it (ServiceLoader); the limit is only a backstop against a wedged ring.
+    if (!g_loader_cv.wait_for(lock, std::chrono::minutes(20),
+                              [] { return g_loader_hold.load(std::memory_order_acquire) == 2; })) {
+      g_loader_hold.store(2, std::memory_order_release);
+      REXLOG_WARN("[native] startup loader: no answer from the ring in 20 minutes, the game goes on");
+    }
+  }
+  REXLOG_INFO("[native] startup loader: the game goes on after {:.1f} s",
+              std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count());
+}
 
 // Host memory report (docs/memory-growth.md).
 REXCVAR_DEFINE_INT32(masseffect_mem_report_s, 60, "Mass Effect",
@@ -861,6 +900,10 @@ class NativeGraphicsSystem final : public rex::system::IGraphicsSystem {
                   "marked at the register writes (docs/batched-constants.md)");
     query_mode_ = REXCVAR_GET(masseffect_native_query_mode);
     query_skip_boxes_ = REXCVAR_GET(masseffect_native_query_skip_boxes);
+    flare_on_ = FlareOcclusionActive();
+    if (flare_on_)
+      REXLOG_INFO("[native] flare occlusion: the flare/glow queries are measured with Vulkan occlusion queries "
+                  "(issued after the base pass); every other query stays 'visible' (mode 0)");
     query_pair_by_address_ = REXCVAR_GET(masseffect_native_query_pair_by_address);
     query_flush_us_ = REXCVAR_GET(masseffect_native_query_flush_us);
     query_timeout_us_ = uint32_t(std::max<int32_t>(0, REXCVAR_GET(masseffect_native_query_timeout_us)));
@@ -1312,6 +1355,7 @@ class NativeGraphicsSystem final : public rex::system::IGraphicsSystem {
         partition::Scope phase_report(partition::kReport);
         Report(false);
       }
+      ServiceLoader();  // masseffect_native_pipelines_prewarm_blocking: only while the game waits in its D3D init
       ServiceQueries(read);
       const uint32_t gen = ring_generation_.load(std::memory_order_acquire);
       if (gen != generation) {
@@ -1350,8 +1394,8 @@ class NativeGraphicsSystem final : public rex::system::IGraphicsSystem {
   // Real occlusion queries: results of finished submissions, an early submission when the ring is idle, and
   // the timeout. Idle = everything the game has written to the ring is parsed.
   void ServiceQueries(uint32_t read) {
-    if (query_mode_ < 2 || !targets_ || !targets_->QueriesPending()) return;
-    if (query_mode_ == 3) {
+    if ((query_mode_ < 2 && !(query_mode_ == 0 && flare_on_)) || !targets_ || !targets_->QueriesPending()) return;
+    if (query_mode_ == 3 || query_mode_ == 0) {
       // Latency-1: only fold the results of finished submissions into the history (fence polls, no waiting, no
       // early submission, no timeout), at most once per millisecond.
       const auto now = std::chrono::steady_clock::now();
@@ -1807,6 +1851,28 @@ class NativeGraphicsSystem final : public rex::system::IGraphicsSystem {
   uint32_t Register(uint32_t index) const { return index < kRegisterCount ? registers_[index] : 0; }
 
   // --- Native drawing ---
+  // Startup loader (MeLoaderHoldGame), ring only, from every wake-up of RingLoop while the game thread waits: about
+  // ten times a second, advance the prewarm and draw its progress screen; release the game when there is nothing left
+  // to wait for, or when the prewarm could not even start within 30 s (no library, no renderer).
+  void ServiceLoader() {
+    if (g_loader_hold.load(std::memory_order_acquire) != 1) return;
+    const auto now = std::chrono::steady_clock::now();
+    if (now < loader_next_) return;
+    loader_next_ = now + std::chrono::milliseconds(100);
+    if (loader_since_ == std::chrono::steady_clock::time_point{}) loader_since_ = now;
+    int state = masseffect::native::DrawsVulkan::kPrewarmNotReady;
+    if (presenter_ && EnsureTargets()) state = targets_->LoaderFrame(presenter_.get());
+    const bool stuck = state == masseffect::native::DrawsVulkan::kPrewarmNotReady &&
+                       now - loader_since_ > std::chrono::seconds(30);
+    if (state != masseffect::native::DrawsVulkan::kPrewarmNone && !stuck) return;
+    if (stuck) REXLOG_WARN("[native] startup loader: the prewarm did not start in 30 s, the game goes on without it");
+    {
+      std::lock_guard<std::mutex> lock(g_loader_mutex);
+      g_loader_hold.store(2, std::memory_order_release);
+    }
+    g_loader_cv.notify_all();
+  }
+
   bool EnsureTargets() {
     if (!targets_ && !targets_failed_) {
       targets_ = masseffect::native::TargetsNative::Create(provider_ ? provider_->vulkan_device() : nullptr,
@@ -2920,7 +2986,9 @@ class NativeGraphicsSystem final : public rex::system::IGraphicsSystem {
       query_signed_ = 0;
       query_sign_ok_ = true;
       ++query_begun_;
-      if (query_mode_ >= 2 && targets_) targets_->QueryBegin();
+      // Mode 0: only the flare queries the guest registered (me_flare_occlusion.cpp) are measured for real.
+      query_measured_ = query_mode_ >= 2 || (query_mode_ == 0 && flare_on_ && FlareTakeMeasured(address - 0x20));
+      if (query_measured_ && targets_) targets_->QueryBegin();
       return;
     }
     if (!query_open_) ++query_unbegun_;
@@ -2929,6 +2997,19 @@ class NativeGraphicsSystem final : public rex::system::IGraphicsSystem {
     ++query_ended_;
     query_draws_total_ += query_draws_;
     if (targets_) targets_->QueryForget(address);
+    const bool measured = query_measured_;
+    query_measured_ = false;
+    if (query_mode_ == 0 && flare_on_ && !measured) FlareTakeKey(address);  // keeps the element queue in order
+    if (query_mode_ == 0 && measured) {
+      // A flare query: the sentinel stays until ReadOcclusion writes the real count (GetData does not wait for
+      // it, me_flare_occlusion.cpp); a query that could not be measured is "visible" now.
+      ++flare_queries_;
+      const uint32_t key = FlareTakeKey(address);
+      if (targets_ && targets_->QueryEnd(address, query_draws_, query_scale_, kQueryVisible, key)) return;
+      ++flare_fallbacks_;
+      masseffect::native::WriteOcclusionCounts(guest, kQueryVisible);
+      return;
+    }
     if (query_mode_ == 1) {
       masseffect::native::WriteOcclusionCounts(guest, 0);
       return;
@@ -2961,7 +3042,7 @@ class NativeGraphicsSystem final : public rex::system::IGraphicsSystem {
   }
 
   void Draw() {
-    if (query_open_ && query_mode_ < 2 && query_skip_boxes_ && QueryDrawInert()) {
+    if (query_open_ && !query_measured_ && query_skip_boxes_ && QueryDrawInert()) {
       ++query_boxes_skipped_;
       return;
     }
@@ -3012,7 +3093,7 @@ class NativeGraphicsSystem final : public rex::system::IGraphicsSystem {
     request.constants_dirty = constants_dirty_on_ ? &constants_dirty_ : nullptr;
     request.generation_fetch = gen_fetch_;
     request.generation_framing = gen_viewport_;
-    request.occlusion_query = query_open_ && query_mode_ >= 2;
+    request.occlusion_query = query_open_ && query_measured_;
     if (memory_ &&
         ((Register(rex::graphics::XE_GPU_REG_PA_CL_CLIP_CNTL) & 0x10000u) ||
          REXCVAR_GET(masseffect_native_edram4_clip_inside)) &&
@@ -3675,6 +3756,8 @@ class NativeGraphicsSystem final : public rex::system::IGraphicsSystem {
   masseffect::native::ShadersNative shaders_;
   std::unique_ptr<masseffect::native::TargetsNative> targets_;
   bool targets_failed_ = false;
+  // ServiceLoader: next progress frame, and when the loader first ran (for its 30 s give-up).
+  std::chrono::steady_clock::time_point loader_next_{}, loader_since_{};
   const masseffect::native::ShaderEntry* vs_ = nullptr;
   const masseffect::native::ShaderEntry* ps_ = nullptr;
   std::vector<uint32_t> microcode_, vs_microcode_, ps_microcode_;
@@ -3704,6 +3787,9 @@ class NativeGraphicsSystem final : public rex::system::IGraphicsSystem {
   // D3D9 occlusion queries (masseffect_native_query_mode, docs/occlusion-queries.md).
   static constexpr uint32_t kQueryVisible = 1000;  // the SDK's fake count (query_occlusion_fake_sample_count)
   int32_t query_mode_ = 0;
+  bool query_measured_ = false;  // the open query is measured with Vulkan queries (modes 2, 3; flares in mode 0)
+  bool flare_on_ = false;        // masseffect_flare_occlusion (me_flare_occlusion.cpp)
+  uint64_t flare_queries_ = 0, flare_fallbacks_ = 0;
   bool query_skip_boxes_ = false;
   int32_t query_flush_us_ = 500;
   uint32_t query_timeout_us_ = 50000;

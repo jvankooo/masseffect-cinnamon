@@ -15,6 +15,7 @@ ko() { echo "MISSING: $*" >&2; fail=1; }
 "$PY" "$H/pch_ui_world_to_screen.py" --gen "$T" --check || ko "pch_ui_world_to_screen (g_me_ui_y_scale in sub_827C07F0)"
 "$PY" "$H/direct_calls.py" --gen "$T" --check           || ko "direct_calls (weak-alias direct calls __imp__sub_*)"
 "$PY" "$H/pch_indirect_dispatch.py" --gen "$T" --check  || ko "pch_indirect_dispatch (REX_INDIRECT_DISPATCH switch)"
+"$PY" "$H/pch_cull_distance.py" --gen "$T" --check      || ko "pch_cull_distance (me_cull_max_distance_sq in sub_824F50B0)"
 # independent greps (guard against a script that reports success wrongly)
 grep -q 'g_me_lockfree_atomics' "$T/masseffect_pch.h"  || ko "g_me_lockfree_atomics not in masseffect_pch.h"
 grep -q 'REX_GUEST_VOLATILE' "$T/masseffect_pch.h"         || ko "REX_GUEST_VOLATILE not in masseffect_pch.h"

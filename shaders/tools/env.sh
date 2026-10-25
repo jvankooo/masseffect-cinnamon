@@ -15,6 +15,8 @@ ROOT=$(cd "$SHADERS/.." && pwd)
 XENOS=$SHADERS/XenosRecomp
 OUT_TOOLS=$ROOT/out/tools
 CXX=${CXX:-clang++}
+# Windows (Git Bash / MSYS2): built tools get .exe so Python's subprocess can start them too.
+case "${OSTYPE:-}" in msys*|cygwin*|win32*) EXE=.exe;; *) EXE=;; esac
 
 _first_dir_with() {  # _first_dir_with <file> <dir>...
   local f=$1; shift
