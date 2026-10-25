@@ -3,11 +3,11 @@
 
 export const CONFIG = {
   project: {
-    title: 'Mass Effect for Nintendo Switch',
-    author: 'NebadasSwifty',
-    repoUrl: 'https://github.com/NebadasSwifty/masseffect-nx',
-    releasesUrl: 'https://github.com/NebadasSwifty/masseffect-nx/releases',
-    issuesUrl: 'https://github.com/NebadasSwifty/masseffect-nx/issues',
+    title: 'Mass Effect Cinnamon for Nintendo Switch',
+    author: 'jvankooo (port by NebadasSwifty)',
+    repoUrl: 'https://github.com/jvankooo/masseffect-cinnamon',
+    releasesUrl: 'https://github.com/jvankooo/masseffect-cinnamon/releases',
+    issuesUrl: 'https://github.com/jvankooo/masseffect-cinnamon/issues',
   },
 
   // Names inside the zip. The zip is extracted into sdmc:/switch/, so `root` becomes sdmc:/switch/masseffect-nx/.

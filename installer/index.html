@@ -3,27 +3,33 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Mass Effect for Switch - Installer</title>
-<meta name="description" content="Builds the SD card package of the Mass Effect Nintendo Switch port from your own game, entirely in your browser.">
+<title>Mass Effect Cinnamon - Installer</title>
+<meta name="description" content="Builds the SD card package of Mass Effect Cinnamon, the 30 fps stock-clock build of the Mass Effect Nintendo Switch port, from your own game, entirely in your browser.">
 <meta name="color-scheme" content="dark">
-<meta name="theme-color" content="#04060c">
+<meta name="theme-color" content="#03060d">
 <link rel="preload" href="assets/fonts/GolosText-Variable.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="preload" href="assets/fonts/RussoOne-Regular.woff2" as="font" type="font/woff2" crossorigin>
 <link rel="icon" href="assets/icon.jpg">
-<link rel="stylesheet" href="style.css?v=0.3.4">
+<link rel="preload" href="assets/bg.webp" as="image">
+<link rel="stylesheet" href="style.css?v=cinnamon-1">
 </head>
 <body>
 <a class="skip-link" href="#main" data-i18n="skip_link">Skip to content</a>
 
 <header class="hero">
-  <div class="banner-wrap">
-    <img class="banner" src="assets/banner.png" alt="Mass Effect, Nintendo Switch port" data-i18n-alt="banner_alt" width="1200" height="273">
-  </div>
-  <div class="hero-row">
-    <h1 class="sr-only" data-i18n="hero_title">Mass Effect</h1>
-    <p class="hero-description" data-i18n="hero_description">Prepare the port on your computer, directly in your browser.</p>
+  <div class="hero-inner">
+    <img class="logo" src="assets/cinnamon_logo.webp" width="1200" height="600" alt="Mass Effect Cinnamon">
+    <h1 class="sr-only">Mass Effect Cinnamon</h1>
+    <p class="kicker">Nintendo Switch · installer · stock clocks</p>
+    <p class="hero-description">Make the SD card package of <strong>Mass Effect Cinnamon</strong>, the optimised build of the Switch
+      port, from <strong>your own</strong> Xbox 360 disc. Everything runs in this browser tab: your game files never leave your computer.</p>
+    <ul class="pills" aria-label="Highlights">
+      <li>30 fps at stock clocks</li><li>Gyro aim assist</li><li>No shader stutter</li><li>Optimised gameplay</li><li>Correct lens flares</li>
+    </ul>
     <div class="hero-tools">
-      <a class="hero-link" href="https://github.com/nebadasSwifty/masseffect-nx/releases" data-i18n="releases_link">Releases ↗</a>
+      <a class="btn primary" href="#step-source">Get started</a>
+      <a class="btn" href="https://github.com/jvankooo/masseffect-cinnamon/releases" data-i18n="releases_link">Releases ↗</a>
+      <a class="btn coffee" href="https://buymeacoffee.com/jvkt18" target="_blank" rel="noopener"><span class="cup" aria-hidden="true">☕</span> Buy me a coffee</a>
       <div class="lang-switch" role="group" aria-label="Language">
         <button class="lang-btn" id="lang-en" type="button" lang="en">EN</button>
         <button class="lang-btn" id="lang-ru" type="button" lang="ru">RU</button>
@@ -196,6 +202,34 @@
       You can also launch the NRO with a title override (hold R while starting an installed game).</p>
   </section>
 
+  <section class="card plain" id="cinnamon">
+    <h2>What Cinnamon optimises</h2>
+    <p class="hint">Measured on a console at the stock clocks (CPU 1224 MHz, GPU 460.8 MHz, handheld). The full write-up is in
+      <a href="https://github.com/jvankooo/masseffect-cinnamon/blob/main/docs/optimisation.md" target="_blank" rel="noopener">docs/optimisation.md</a>.</p>
+    <div class="table-wrap"><table class="opt-table">
+      <thead><tr><th>Optimisation</th><th>What it fixes</th><th>Gain</th></tr></thead>
+      <tbody>
+        <tr><td>No 2x MSAA tiling</td><td>The whole scene was replayed once per EDRAM tile</td><td class="gain">~3,300 → ~1,500 draws a frame</td></tr>
+        <tr><td>No guest depth prepass</td><td>~430 draws a frame built and parsed, then thrown away</td><td class="gain">20-26 → 27-30 fps</td></tr>
+        <tr><td>Inline texture updates</td><td>Streaming split frames when turning around</td><td class="gain">15 fps bursts gone</td></tr>
+        <tr><td>Shader prewarm loader</td><td>Vulkan pipelines compiled mid-cutscene</td><td class="gain">8-13 fps → smooth cutscenes</td></tr>
+        <tr><td>720x400 + FXAA + FSR</td><td>GPU budget at 460.8 MHz, without stair steps</td><td class="gain">20 % fewer pixels</td></tr>
+        <tr><td>Cheaper shadows, kept</td><td>432² shadow maps for every character</td><td class="gain">~⅓ of the shadow pixels</td></tr>
+        <tr><td>Small-object culling</td><td>Far rocks and props drawn as specks</td><td class="gain">fewer outdoor draws</td></tr>
+        <tr><td>Real flare occlusion</td><td>Lens flares and halos shining through walls</td><td class="gain">correct picture</td></tr>
+      </tbody>
+    </table></div>
+  </section>
+
+  <section class="card plain" id="gyro">
+    <h2>Gyro aim assist</h2>
+    <p>Hold <strong>ZL</strong> to aim and move the console or controller: the motion is added to the right stick. The turn follows
+      the real horizontal axis whichever way you hold the console (the rotation is measured around gravity), small tremors are
+      filtered out, and the first motion already gets past the game's own stick deadzone. <strong>L + R + X</strong> /
+      <strong>L + R + Y</strong> raise and lower the sensitivity in game; <code>input_gyro = 2</code> in <code>masseffect.toml</code>
+      keeps it always on, <code>input_gyro_invert_x</code> / <code>_y</code> flip an axis.</p>
+  </section>
+
   <section class="card plain" id="privacy">
     <h2 data-i18n="privacy_title">Privacy</h2>
     <p data-i18n="privacy_desc" data-i18n-html="true">
@@ -210,6 +244,7 @@
   <section class="card plain" id="credits">
     <h2 data-i18n="credits_title">Credits &amp; Acknowledgments</h2>
     <ul class="credits-list">
+      <li><strong><a href="https://github.com/nebadasSwifty/masseffect-nx" target="_blank" rel="noopener">NebadasSwifty</a></strong> — Author of masseffect-nx, the Mass Effect Switch port Cinnamon is built on, and of this installer.</li>
       <li data-i18n="credits_bioware" data-i18n-html="true"><strong>BioWare &amp; Electronic Arts</strong> — Original creators of Mass Effect. This is an unofficial, non-commercial fan project.</li>
       <li data-i18n="credits_stevens" data-i18n-html="true"><strong><a href="https://github.com/StevensND" target="_blank" rel="noopener">StevensND</a></strong> — Creator of <a href="https://github.com/StevensND/NFSMW-NX" target="_blank" rel="noopener">NFSMW-NX</a>, whose pioneering work on running statically recompiled Xbox 360 games on Nintendo Switch and client-side browser shader packaging served as the foundational inspiration for this installer. <em>(Note: StevensND is not affiliated with or responsible for this Mass Effect project.)</em></li>
       <li data-i18n="credits_rexglue" data-i18n-html="true"><strong><a href="https://github.com/rexglue/rexglue-sdk" target="_blank" rel="noopener">Tom Clay &amp; ReXGlue SDK</a></strong> — The static binary translation framework for Xbox 360 executables.</li>
@@ -220,11 +255,15 @@
   </section>
 </main>
 
+<a class="coffee-float" href="https://buymeacoffee.com/jvkt18" target="_blank" rel="noopener">
+  <span class="cup" aria-hidden="true">☕</span> Buy me a coffee
+</a>
+
 <footer>
   <a id="repo-link" href="#" data-i18n="footer_source">Source code and releases</a> · <span data-i18n="footer_by">by</span> <span id="author"></span> ·
   <a href="#credits" data-i18n="footer_credits">Credits</a> · <a href="THIRD_PARTY_NOTICES.md" data-i18n="footer_notices">Third-party notices</a> · <span data-i18n="footer_disclaimer">Not affiliated with BioWare, Electronic Arts or Nintendo.</span>
 </footer>
 
-<script type="module" src="js/app.js?v=0.3.4"></script>
+<script type="module" src="js/app.js?v=cinnamon-1"></script>
 </body>
 </html>

@@ -163,7 +163,12 @@ jobs:
       - name: Verify DXC can compile a shader
         run: node installer/tools/wasm_smoke.mjs wasm-all
       - name: Stage a complete site
-        run: installer/tools/stage_site.sh _site --wasm wasm-all --releases release-assets --require-complete
+        # Mass Effect Cinnamon publishes the English edition only: require its NRO and the forwarder, not every edition's.
+        run: |
+          for a in masseffect-nx.nro masseffect-nx-forwarder.nsp; do
+            test -s "release-assets/$a" || { echo "::error::release asset $a is missing"; exit 1; }
+          done
+          installer/tools/stage_site.sh _site --wasm wasm-all --releases release-assets
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

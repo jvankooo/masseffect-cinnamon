@@ -1,65 +1,54 @@
 <div align="center">
 
-<img src="extras/banner.png" alt="Mass Effect Cinnamon" width="60%">
+<img src="extras/cinnamon_logo.jpg" alt="Mass Effect Cinnamon" width="720">
 
-# 🍂 Mass Effect Cinnamon
+### BioWare's *Mass Effect* (Xbox 360, 2007), statically recompiled for the Nintendo Switch and tuned for 30 fps at **stock clocks**
 
-### BioWare's *Mass Effect* (Xbox 360, 2007), statically recompiled for the Nintendo Switch, and tuned for a steady 30 fps at stock clocks
-
-[![Platform](https://img.shields.io/badge/platform-Nintendo%20Switch-e60012?style=for-the-badge&logo=nintendoswitch&logoColor=white)](#-building-from-source)
+[![Installer](https://img.shields.io/badge/Installer-open_in_browser-e0803f?style=for-the-badge&logo=googlechrome&logoColor=white)](https://jvankooo.github.io/masseffect-cinnamon/)
+[![Release](https://img.shields.io/github/v/release/jvankooo/masseffect-cinnamon?style=for-the-badge&color=5cc2f2&label=Release&include_prereleases)](https://github.com/jvankooo/masseffect-cinnamon/releases)
+[![Platform](https://img.shields.io/badge/Switch-homebrew-e60012?style=for-the-badge&logo=nintendoswitch&logoColor=white)](#-install)
 [![Clocks](https://img.shields.io/badge/clocks-stock%201224%20%2F%20460.8%20MHz-2ea44f?style=for-the-badge)](docs/optimisation.md)
-[![Target](https://img.shields.io/badge/target-30%20fps-orange?style=for-the-badge)](docs/optimisation.md)
-[![License](https://img.shields.io/badge/license-GPL--3.0-blue?style=for-the-badge)](LICENSE)
+[![License](https://img.shields.io/badge/License-GPL--3.0-555?style=for-the-badge)](LICENSE)
+[![Buy me a coffee](https://img.shields.io/badge/Buy_me_a_coffee-%E2%98%95-ffdd00?style=for-the-badge&logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/jvkt18)
 
 **A performance fork of [masseffect-nx](https://github.com/nebadasSwifty/masseffect-nx) by
-[NebadasSwifty](https://github.com/nebadasSwifty)**: all the credit for the port itself goes there.
+[NebadasSwifty](https://github.com/nebadasSwifty)**. All the credit for the port itself goes there.
 
-[What's new](#-whats-new-in-cinnamon) •
-[Performance](#-performance) •
-[Build it](#-building-from-source) •
-[Controls](#-controls) •
-[Optimisation deep dive](docs/optimisation.md) •
-[Credits](#-credits)
+**[Optimisations](#-the-optimisations)** · **[Gyro aim](#-gyro-aim-assist)** · **[Install](#-install)** ·
+**[Build](#%EF%B8%8F-building-from-source)** · **[Controls](#-controls)** · **[Credits](#-credits)**
+
+<br>
+
+<a href="https://buymeacoffee.com/jvkt18"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee" height="54"></a>
 
 </div>
 
 ---
 
-## ✨ What's new in Cinnamon
+## ⚡ The optimisations
 
-Cinnamon keeps everything the original port does: native ARM64 code translated from the game's `default.xex`, a
-Vulkan renderer on Mesa/NVK, and no emulation of the Xbox 360 CPU. On top of that it adds:
-
-- 🎯 **Gyro aim assist.** Aim with motion controls while holding **ZL**, on top of the right stick. Sensitivity can be
-  changed in game (**L + R + X** / **L + R + Y**); always-on mode and per-axis inversion are in `masseffect.toml`.
-- ⚡ **Optimised gameplay at stock clocks.** It targets 30 fps on CPU 1224 MHz / GPU 460.8 MHz handheld, **with no
-  overclock**. In the latest measured run 79 % of gameplay holds 29-30 fps and nothing drops below 20
-  ([how](docs/optimisation.md)).
-- 🎬 **Smooth cutscenes.** A **"PREPARING SHADERS" loader** builds the Vulkan pipelines once, before the game starts,
-  so cutscenes and new areas no longer stutter through shader compiles.
-- 🧠 **No wasted draws.** The game's **depth prepass is no longer built** (~430 draws per frame on the Normandy that
-  the renderer threw away anyway), and the **2x MSAA tiling that replayed the whole scene twice is off**.
-- 🌄 **Small-object distance culling.** Distant rocks, debris and props smaller than a few pixels are skipped,
-  sized by each object; characters and large scenery are never touched.
-- 🖼️ **Sharper 720x400 → 720p image.** Rendering at **720x400** keeps the GPU in budget, a new **FXAA pass** cleans
-  the edges, and **FSR** upscales to the screen with HUD-friendly sharpening.
-- 🔦 **Correct lens flares.** Flares and light halos are **occlusion-tested for real** again, so they no longer shine
-  through walls, rocks or Shepard.
-- 🌑 **Shadows kept, made cheaper.** Character shadows stay, at lower cost (256x256 maps, tiny far shadows skipped).
-- 🧵 **No streaming stalls.** Texture streaming no longer splits frames when you turn around: the **180° turn drop
-  to 15 fps is gone**.
-- 🔋 **Official memory profile.** It requests Nintendo's own *GPU 460.8 MHz + memory 1600 MHz* handheld configuration.
-  That is not an overclock, and it helps the cache-bound CPU threads.
-
-> [!NOTE]
-> Everything was measured on a real console at stock clocks, from the port's own profiler logs.
-> **[docs/optimisation.md](docs/optimisation.md)** explains each change, why it was needed and what it gained.
-
-## 📊 Performance
+Every row was found in a console log and measured on a real Switch at **CPU 1224 MHz / GPU 460.8 MHz, handheld, no
+overclock**. The full story, with the numbers, is in **[docs/optimisation.md](docs/optimisation.md)**.
 
 <div align="center">
 
-10-second profile blocks during gameplay, handheld, CPU 1224 MHz / GPU 460.8 MHz
+| | Optimisation | What it fixes | Gain |
+| :---: | :--- | :--- | :--- |
+| 🧱 | **No 2x MSAA tiling** | The game replayed its whole scene once per EDRAM tile | **~3,300 → ~1,500 draws** a frame on the Normandy |
+| 🧠 | **No guest depth prepass** | ~430 draws a frame built, parsed and thrown away | heavy views **20-26 → 27-30 fps** |
+| 🧵 | **Inline texture updates** | Texture streaming split frames when you turned around | **15 fps bursts on a 180° turn: gone** |
+| 🎬 | **Shader prewarm loader** | Vulkan pipelines compiled in the middle of cutscenes | cutscenes **8-13 fps → smooth** |
+| 🖼️ | **720x400 + FXAA + FSR** | GPU budget at 460.8 MHz, without stair-stepped edges | **20 % fewer pixels**, clean edges |
+| 🌑 | **Cheaper shadows, kept** | 432² shadow maps for every character, even tiny ones | **~⅓ of the shadow pixels** |
+| 🌄 | **Small-object culling** | Far rocks, debris and props drawn as specks | fewer outdoor draws *(new, not yet measured)* |
+| 🎮 | **Lighter game thread** | VFX budget, corpse cleanup, GC and light-environment updates | fewer main-thread spikes |
+| 🔋 | **Official 1600 MHz memory profile** | Cache-bound CPU threads at the default 1331 MHz | free, **not an overclock** |
+| 🔦 | **Real flare occlusion** | Lens flares and halos shining through walls and Shepard | **correct picture** |
+| 🎞️ | **Motion-blur crop fix** | Black intro cutscenes at 720x400 | **cutscenes render** |
+
+### 📊 Result
+
+10-second profile blocks during gameplay, handheld, stock clocks
 
 | Build | 29-30 fps | 25-29 fps | 20-25 fps | < 20 fps | Mean |
 | :--- | :---: | :---: | :---: | :---: | :---: |
@@ -70,14 +59,49 @@ Vulkan renderer on Mesa/NVK, and no emulation of the Xbox 360 CPU. On top of tha
 
 Cutscenes, interiors, dialogue and most exploration run locked at 30. The heaviest crowd and outdoor scenes (the Eden
 Prime dig-site camp, the busy Normandy crew deck) can still dip into the low 20s, because all three CPU cores are full
-there; the newest change, small-object culling, is aimed at exactly those scenes.
+there; small-object culling is aimed at exactly those scenes.
+
+## 🎯 Gyro aim assist
+
+Motion aiming, built into the port's Switch input driver
+([`sdk/src/input/switch/switch_input_driver.cpp`](sdk/src/input/switch/switch_input_driver.cpp)):
+
+- **Hold ZL** (aim / zoom) and turn the console or controller: the motion is **added to the right stick**, so the stick
+  still does the big turns and the gyro does the fine aim. `input_gyro = 2` keeps it on all the time, `0` turns it off.
+- **Works however you hold it.** The turn is the rotation around **gravity** (the six-axis sensor's angular velocity
+  projected on a low-passed accelerometer "up"), not around the controller's own axis, so tilting the console does not
+  turn Shepard. Pitch is the rotation about the controller's X axis.
+- **Precise and steady.** A dead zone (`input_gyro_deadzone`, 1.5°/s) removes hand tremor and sensor drift, light
+  smoothing removes jitter, and the first motion past it already jumps over the game's own stick dead zone
+  (`input_gyro_min_stick`), so small corrections register.
+- **Tunable in game.** **L + R + X** / **L + R + Y** raise and lower the sensitivity by 0.5 (default 3.0: the stick is
+  fully pushed at 40°/s). X and Y are hidden from the game while L and R are held. Every attached controller layout
+  works (handheld, Pro Controller, Joy-Con pair), and `input_gyro_invert_x` / `_y` flip an axis.
+
+## ✨ Also in Cinnamon
+
+- 🎬 **"PREPARING SHADERS" screen** on the first boot instead of stutter later; every boot after it is quick.
+- 🔦 **Lens flares** that fade behind geometry like on the Xbox 360, measured with real GPU occlusion queries.
+- 🌑 **Character shadows kept** at lower cost; nothing important was cut to reach 30.
+- 🛠️ **Windows build script** (`tools/build_nro.ps1`) next to the Docker build.
+
+## 📦 Install
+
+1. Open the **[installer page](https://jvankooo.github.io/masseffect-cinnamon/)** in Chrome or Edge on your computer.
+2. Choose your Xbox 360 disc image (`.iso`) or the extracted disc. The page checks the edition, makes the shaders from
+   your disc with WebAssembly and downloads the Cinnamon build from this repository's latest release. **Your game
+   files never leave your computer.**
+3. Extract the resulting `masseffect-nx.zip` into `sdmc:/switch/` and start it with full memory: hold **R** while
+   launching an installed game, or install the NSP launcher the page offers.
 
 ## 🛠️ Building from source
 
 > [!IMPORTANT]
-> **There is no installer and no download of the game.** Clone this repository and build the port yourself from your
-> **own original Xbox 360 disc image** of *Mass Effect (USA, Europe) (En,Es,Pl) (Rev 1)*. The repository contains no
-> game files, and nothing made from the disc may ever be committed to it.
+> **No game files are included.** The port is made from your **own original Xbox 360 disc image** of *Mass Effect
+> (USA, Europe) (En,Es,Pl) (Rev 1)*. The repository contains no game files, and nothing made from the disc may ever be
+> committed to it.
+
+You can also build everything yourself from source instead of using the installer:
 
 The full step-by-step guide is in **[docs/building.md](docs/building.md)** (macOS and Linux through Docker; native
 Windows in its last section). In short:
@@ -155,7 +179,7 @@ title mode, or use a forwarder set to the 39-bit address space.
 
 </div>
 
-### 🎯 Gyro aim assist
+### 🎯 Gyro controls
 
 <div align="center">
 
@@ -208,6 +232,13 @@ Every key in [`app/masseffect.toml`](app/masseffect.toml) is commented. The Cinn
 - [docs/README.md](docs/README.md): the upstream guide to how the whole port works (start here to learn the internals).
 - [docs/known-issues.md](docs/known-issues.md): what is not finished or not proven.
 
+## ☕ Support
+
+Cinnamon took a lot of late nights of console logs and frame-by-frame profiling. If it made Mass Effect playable on
+your Switch, a coffee keeps the next round of optimisations coming:
+
+<a href="https://buymeacoffee.com/jvkt18"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy me a coffee" height="48"></a>
+
 ## 💛 Credits
 
 - **[NebadasSwifty](https://github.com/nebadasSwifty)**: author of **[masseffect-nx](https://github.com/nebadasSwifty/masseffect-nx)**,
@@ -231,7 +262,7 @@ Every key in [`app/masseffect.toml`](app/masseffect.toml) is commented. The Cinn
 ## ⚖️ Legal
 
 No affiliation with Electronic Arts or BioWare. "Mass Effect" is a trademark of Electronic Arts Inc. This repository
-contains **no assets or program code from the original game**: you must build it from your own legally obtained disc.
+contains **no assets or program code from the original game**: the installer or a source build makes the package from your own legally obtained disc.
 Running homebrew requires custom firmware, which violates Nintendo's terms of service and can get a console banned.
 That is your call.
 
